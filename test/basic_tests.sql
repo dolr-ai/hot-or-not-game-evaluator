@@ -121,3 +121,35 @@ SELECT hot_or_not_evaluator.update_counter('sgx-null_test', NULL, 80);
 -- watch percentage should not accept null values (passed)
 SELECT hot_or_not_evaluator.update_counter('sgx-null_test', TRUE, NULL);
 
+--
+
+-- TEST_PATTERNS = [
+--     VideoPattern("test_steady_high", steady_high, "Steady High Engagement"),
+--     VideoPattern("test_steady_low", steady_low, "Steady Low Engagement"),
+--     VideoPattern("test_rising", rising, "Rising Engagement"),
+--     VideoPattern("test_falling", falling, "Falling Engagement"),
+--     VideoPattern("test_spike", spike_middle, "Spike in Middle"),
+--     VideoPattern("test_dip", dip_middle, "Dip in Middle"),
+-- ]
+DELETE FROM hot_or_not_evaluator.video_hot_or_not_status
+WHERE video_id LIKE 'sgx-%';
+
+DELETE FROM hot_or_not_evaluator.video_engagement_relation
+WHERE video_id LIKE 'sgx-%';
+
+DELETE FROM hot_or_not_evaluator.video_hot_or_not_status
+WHERE video_id LIKE 'sgx-%';
+
+select * from hot_or_not_evaluator.video_engagement_relation
+where video_id LIKE 'sgx-%'
+-- order by timestamp_mnt desc
+order by video_id, timestamp_mnt desc
+-- limit 10;
+
+select * from hot_or_not_evaluator.video_hot_or_not_status
+where video_id LIKE 'sgx-%'
+-- limit 10;
+
+
+
+
