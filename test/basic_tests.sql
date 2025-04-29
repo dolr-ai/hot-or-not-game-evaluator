@@ -135,15 +135,15 @@ DELETE FROM hot_or_not_evaluator.video_hot_or_not_status
 WHERE video_id LIKE 'sgx-%';
 
 DELETE FROM hot_or_not_evaluator.video_engagement_relation
-WHERE video_id LIKE 'sgx-%';
+WHERE video_id LIKE 'sgx-%'
+AND timestamp_mnt <= '2025-04-29 16:30:00';
 
-DELETE FROM hot_or_not_evaluator.video_hot_or_not_status
-WHERE video_id LIKE 'sgx-%';
+
 
 select * from hot_or_not_evaluator.video_engagement_relation
 where video_id LIKE 'sgx-%'
 -- order by timestamp_mnt desc
-order by video_id, timestamp_mnt desc
+-- order by video_id, timestamp_mnt desc
 -- limit 10;
 
 select * from hot_or_not_evaluator.video_hot_or_not_status
@@ -152,4 +152,7 @@ where video_id LIKE 'sgx-%'
 
 
 
+select * from hot_or_not_evaluator.video_hot_or_not_status
 
+select count(*) from hot_or_not_evaluator.video_engagement_relation
+where video_id LIKE 'sgx-%'

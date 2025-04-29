@@ -350,6 +350,34 @@ def populate_database_with_data(df, conn_string):
     print("Data population complete!")
 
 
+def generate_data_to_populate_database(
+    end_time=datetime(2025, 4, 29, 16, 30, 0),
+    period=timedelta(days=1),
+    video_id="sgx-test_video_simple",
+):
+    data = generate_one_day_data(end_time, period, video_id)
+    populate_database_with_data(data, conn_string)
+
+
+def clean_database_post_data_population(
+    test_video_id_prefix="sgx-",
+    end_time=datetime(2025, 4, 29, 16, 30, 0),
+):
+    with psycopg.connect(conn_string) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM hot_or_not_evaluator.video_hot_or_not_status WHERE video_id LIKE %s",
+                (f"{test_video_id_prefix}%",),
+            )
+            conn.commit()
+
+            cur.execute(
+                "DELETE FROM hot_or_not_evaluator.video_engagement_relation WHERE video_id LIKE %s AND timestamp_mnt <= %s",
+                (f"{test_video_id_prefix}%", end_time),
+            )
+            conn.commit()
+
+
 # %%
 # Example usage:
 if __name__ == "__main__":
@@ -385,7 +413,7 @@ if __name__ == "__main__":
                 print(f"Reference predicted DS score: {result[6]}")
             else:
                 print("No hot status found")
-# %%
-result
-# %%
-data["watch_count_mnt"].describe()
+# # %%
+# result
+# # %%
+# data["watch_count_mnt"].describe()

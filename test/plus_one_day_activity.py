@@ -10,6 +10,7 @@ import json
 import time
 import matplotlib.pyplot as plt
 from sqlalchemy import create_engine
+import seaborn as sns
 
 # Load environment variables
 load_dotenv("/Users/sagar/work/yral/hot-or-not-game-evaluator/test/.env")
@@ -898,6 +899,89 @@ def retrieve_data_for_comparison(
 
 
 # %%
+def visualize_score_comparisons(
+    postgres_data, pandas_metrics, pandas_status, postgres_status, save_path=""
+):
+    # Set seaborn style
+    sns.set_style("whitegrid")
+
+    # Plot 1: DS scores over time
+    plt.figure(figsize=(12, 6))
+
+    # Plot PostgreSQL data
+    sns.lineplot(
+        x=postgres_data["timestamp_mnt"],
+        y=postgres_data["ds_score"],
+        label="PostgreSQL DS Score",
+        color="navy",
+    )
+
+    # Plot pandas data
+    if not pandas_metrics.empty:
+        sns.lineplot(
+            x=pandas_metrics["timestamp_mnt"],
+            y=pandas_metrics["ds_score"],
+            label="Pandas DS Score",
+            color="crimson",
+            linestyle="--",
+        )
+
+    plt.title("DS Score Comparison", fontsize=14)
+    plt.xlabel("Time", fontsize=12)
+    plt.ylabel("DS Score", fontsize=12)
+    plt.legend()
+    plt.tight_layout()
+
+    # Plot 2: Bar comparison if we have current and reference scores
+    if (
+        pandas_status["current_avg_ds_score"] is not None
+        and postgres_status["current_avg_ds_score"] is not None
+    ):
+
+        # Create DataFrame for better seaborn integration
+        import pandas as pd
+
+        comp_data = pd.DataFrame(
+            {
+                "Metric": [
+                    "Current DS Score",
+                    "Current DS Score",
+                    "Reference DS Score",
+                    "Reference DS Score",
+                ],
+                "Implementation": ["Pandas", "PostgreSQL", "Pandas", "PostgreSQL"],
+                "Value": [
+                    pandas_status["current_avg_ds_score"],
+                    postgres_status["current_avg_ds_score"],
+                    pandas_status["reference_predicted_avg_ds_score"],
+                    postgres_status["reference_predicted_avg_ds_score"],
+                ],
+            }
+        )
+        plt.figure(figsize=(10, 6))
+
+        # Create grouped bar chart
+        ax = sns.barplot(
+            x="Metric",
+            y="Value",
+            hue="Implementation",
+            data=comp_data,
+            palette=["crimson", "navy"],
+        )
+
+        # Add values on top of the bars
+        for bar in ax.containers:
+            ax.bar_label(bar, fmt="%.2f")
+
+        plt.title("Current vs Reference DS Score Comparison", fontsize=14)
+        plt.ylabel("DS Score", fontsize=12)
+        plt.legend(title="Implementation", bbox_to_anchor=(1.05, 1), loc="upper left")
+        plt.tight_layout()
+
+    return
+
+
+# %%
 def main(
     video_id="sgx-test_video_simple",
     start_timestamp=None,  # Default to None to use the defined default or database timestamp
@@ -921,8 +1005,6 @@ def main(
         None
     """
     # Use default timestamp if none provided
-    if start_timestamp is None:
-        start_timestamp = datetime(2025, 4, 29, 16, 31, 0)
 
     print(f"Starting activity simulation for video {video_id} from {start_timestamp}")
 
@@ -986,97 +1068,9 @@ def main(
 
         # 7. Visualize data if enough data points
         if len(postgres_data) >= 2:
-            try:
-                # Plot DS scores over time
-                plt.figure(figsize=(12, 6))
-
-                # Plot PostgreSQL data
-                plt.plot(
-                    postgres_data["timestamp_mnt"],
-                    postgres_data["ds_score"],
-                    "b-",
-                    label="PostgreSQL DS Score",
-                )
-
-                # Plot pandas data
-                if not pandas_metrics.empty:
-                    plt.plot(
-                        pandas_metrics["timestamp_mnt"],
-                        pandas_metrics["ds_score"],
-                        "r--",
-                        label="Pandas DS Score",
-                    )
-
-                plt.title("DS Score Comparison")
-                plt.xlabel("Time")
-                plt.ylabel("DS Score")
-                plt.legend()
-                plt.grid(True)
-                plt.tight_layout()
-
-                # Save plot
-                plt.savefig("ds_score_comparison.png")
-                print("Plot saved to ds_score_comparison.png")
-
-                # Plot additional comparison if we have current and reference scores
-                if (
-                    pandas_status["current_avg_ds_score"] is not None
-                    and postgres_status["current_avg_ds_score"] is not None
-                ):
-                    plt.figure(figsize=(10, 6))
-
-                    # Create bar chart comparing current and reference scores
-                    labels = ["Current DS Score", "Reference DS Score"]
-                    pandas_values = [
-                        pandas_status["current_avg_ds_score"],
-                        pandas_status["reference_predicted_avg_ds_score"],
-                    ]
-                    postgres_values = [
-                        postgres_status["current_avg_ds_score"],
-                        postgres_status["reference_predicted_avg_ds_score"],
-                    ]
-
-                    x = np.arange(len(labels))
-                    width = 0.35
-
-                    fig, ax = plt.subplots()
-                    pandas_bars = ax.bar(
-                        x - width / 2, pandas_values, width, label="Pandas"
-                    )
-                    postgres_bars = ax.bar(
-                        x + width / 2, postgres_values, width, label="PostgreSQL"
-                    )
-
-                    ax.set_ylabel("DS Score")
-                    ax.set_title("Current vs Reference DS Score Comparison")
-                    ax.set_xticks(x)
-                    ax.set_xticklabels(labels)
-                    ax.legend()
-
-                    # Add value labels on bars
-                    def add_labels(bars):
-                        for bar in bars:
-                            height = bar.get_height()
-                            if height is not None and not np.isnan(height):
-                                ax.annotate(
-                                    f"{height:.2f}",
-                                    xy=(bar.get_x() + bar.get_width() / 2, height),
-                                    xytext=(0, 3),  # 3 points vertical offset
-                                    textcoords="offset points",
-                                    ha="center",
-                                    va="bottom",
-                                )
-
-                    add_labels(pandas_bars)
-                    add_labels(postgres_bars)
-
-                    fig.tight_layout()
-                    plt.savefig("ds_score_bar_comparison.png")
-                    print("Bar chart saved to ds_score_bar_comparison.png")
-            except Exception as e:
-                print(f"Error creating visualization: {e}")
-        else:
-            print("Not enough data for visualization")
+            visualize_score_comparisons(
+                postgres_data, pandas_metrics, pandas_status, postgres_status
+            )
     else:
         print("Cannot compare results: PostgreSQL processing failed")
 
@@ -1085,11 +1079,25 @@ def main(
 
 # %%
 if __name__ == "__main__":
+    from one_day_history import (
+        generate_data_to_populate_database,
+        clean_database_post_data_population,
+    )
+
+    if True:
+        clean_database_post_data_population(
+            test_video_id_prefix="sgx-",
+            end_time=datetime(2025, 4, 29, 16, 30, 0),
+        )
+        generate_data_to_populate_database()
+
     main(
         video_id="sgx-test_video_simple",
-        start_timestamp=datetime(2025, 4, 29, 16, 31, 0),
-        duration_hours=10 / 60,  # Just 25 minutes for testing
+        start_timestamp=datetime(2025, 4, 29, 17, 00, 0),
+        duration_hours=30 / 60,  # Just 25 minutes for testing
         interval_minutes=4,  # Generate data every 4 minutes
         events_per_interval=15,  # Start with 10 events per interval
         growth_rate=1.05,  # 5% growth rate per interval
     )
+
+# %%
