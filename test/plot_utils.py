@@ -3,7 +3,6 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from datetime import timedelta
 import os
-import pytz
 
 
 # %%
@@ -13,8 +12,8 @@ def visualize_score_comparisons_zoomed(
     pandas_status,
     postgres_status,
     save_dir=None,
-    video_id="test",
-    pattern_type="default",
+    video_id=None,
+    pattern_type=None,
     n_timestamps=100,
 ):
     """
@@ -44,14 +43,7 @@ def visualize_score_comparisons_zoomed(
     # Create a title with pattern and video information if provided
     title_prefix = ""
     if pattern_type and video_id:
-        # Use plain text for hot status (no emojis)
-        if postgres_status and postgres_status.get("hot_or_not") is not None:
-            hot_status = "HOT" if postgres_status["hot_or_not"] else "NOT HOT"
-            title_prefix = (
-                f"{pattern_type.capitalize()} Pattern - {video_id} - {hot_status}\n"
-            )
-        else:
-            title_prefix = f"{pattern_type.capitalize()} Pattern - {video_id}\n"
+        title_prefix = f"{pattern_type.capitalize()} Pattern - {video_id}\n"
 
     # Create a unique file prefix for this video and pattern
     file_prefix = f"{video_id}_{pattern_type}_"
@@ -60,11 +52,10 @@ def visualize_score_comparisons_zoomed(
     plt.figure(figsize=(15, 8))
 
     # Get the last n_timestamps from PostgreSQL data
-    postgres_data_sorted = postgres_data.sort_values("timestamp_mnt")
-    if len(postgres_data_sorted) > n_timestamps:
-        postgres_zoomed = postgres_data_sorted.iloc[-n_timestamps:]
+    if len(postgres_data) > n_timestamps:
+        postgres_zoomed = postgres_data.iloc[-n_timestamps:]
     else:
-        postgres_zoomed = postgres_data_sorted
+        postgres_zoomed = postgres_data
         logging.info(
             f"Only {len(postgres_data)} PostgreSQL timestamps available, showing all"
         )
@@ -79,14 +70,14 @@ def visualize_score_comparisons_zoomed(
     sns.lineplot(
         x=postgres_zoomed["timestamp_mnt"],
         y=postgres_zoomed["ds_score"],
-        label="PostgreSQL DS Score (Historical)",
+        label="historical_ds_score",
         color="navy",
     )
 
     # Filter to match most recent PostgreSQL data
-    five_mins_ago = max_time - timedelta(minutes=5)
-    postgres_recent = postgres_data_sorted[
-        postgres_data_sorted["timestamp_mnt"] >= five_mins_ago
+    postgres_recent = postgres_data[
+        postgres_data["timestamp_mnt"]
+        >= (postgres_data["timestamp_mnt"].max() - timedelta(minutes=5))
     ]
 
     # Plot recent PostgreSQL data with more emphasis
@@ -94,32 +85,15 @@ def visualize_score_comparisons_zoomed(
         sns.lineplot(
             x=postgres_recent["timestamp_mnt"],
             y=postgres_recent["ds_score"],
-            label="PostgreSQL DS Score (Recent 5min)",
+            label="src_postgres_ds_score",
             color="gold",
             alpha=1.0,
             linewidth=3,
             zorder=5,
         )
 
-    # Check if pandas timestamps have the same timezone awareness as postgres
+    # Plot pandas data if available and within the zoomed time range
     if not pandas_metrics.empty:
-        pg_has_tz = postgres_data["timestamp_mnt"].iloc[0].tzinfo is not None
-        pd_has_tz = pandas_metrics["timestamp_mnt"].iloc[0].tzinfo is not None
-
-        # Make pandas timestamps timezone-aware/naive to match postgres timestamps
-        if pd_has_tz != pg_has_tz:
-            pandas_metrics = pandas_metrics.copy()
-            if pg_has_tz and not pd_has_tz:
-                # Make pandas timestamps timezone-aware
-                pandas_metrics["timestamp_mnt"] = pandas_metrics["timestamp_mnt"].apply(
-                    lambda x: x.replace(tzinfo=pytz.UTC)
-                )
-            elif not pg_has_tz and pd_has_tz:
-                # Make pandas timestamps timezone-naive
-                pandas_metrics["timestamp_mnt"] = pandas_metrics["timestamp_mnt"].apply(
-                    lambda x: x.replace(tzinfo=None)
-                )
-
         # Filter pandas data to match the zoomed range
         pandas_in_range = pandas_metrics[
             (pandas_metrics["timestamp_mnt"] >= min_time)
@@ -130,7 +104,7 @@ def visualize_score_comparisons_zoomed(
             sns.lineplot(
                 x=pandas_in_range["timestamp_mnt"],
                 y=pandas_in_range["ds_score"],
-                label="Pandas DS Score",
+                label="sim_pandas_ds_score",
                 color="crimson",
                 linestyle="--",
             )
@@ -146,7 +120,7 @@ def visualize_score_comparisons_zoomed(
                 sns.lineplot(
                     x=pandas_metrics["timestamp_mnt"],
                     y=pandas_metrics["ds_score"],
-                    label="Pandas DS Score (After Zoom Range)",
+                    label="sim_pandas_ds_score (after zoom range)",
                     color="crimson",
                     linestyle="--",
                 )
@@ -154,33 +128,85 @@ def visualize_score_comparisons_zoomed(
                     f"Plotted {len(pandas_metrics)} pandas points after zoomed range"
                 )
 
-    # If we have hot status information, add a reference line
-    if postgres_status and postgres_status.get("current_avg_ds_score") is not None:
-        current_avg = postgres_status["current_avg_ds_score"]
-        plt.axhline(
-            y=current_avg,
-            color="blue",
-            linestyle=":",
-            label=f"Current Avg DS Score: {current_avg:.4f}",
-        )
+    # Plot the predicted score if available
+    if pandas_status["reference_predicted_avg_ds_score"] is not None:
+        pred_score = pandas_status["reference_predicted_avg_ds_score"]
 
-        # Add predicted score line if available
-        if postgres_status.get("reference_predicted_avg_ds_score") is not None:
-            pred_score = postgres_status["reference_predicted_avg_ds_score"]
-            plt.axhline(
-                y=pred_score,
-                color="red",
-                linestyle=":",
-                label=f"Predicted DS Score: {pred_score:.4f}",
+        # If we have pandas data, use its midpoint for the prediction star
+        if not pandas_metrics.empty:
+            pandas_min_time = pandas_metrics["timestamp_mnt"].min()
+            pandas_max_time = pandas_metrics["timestamp_mnt"].max()
+
+            # Define window edges - these are used for both the shading and prediction point
+            now = pandas_max_time
+            five_mins_ago = max(pandas_min_time, now - timedelta(minutes=5))
+
+            # Calculate midpoint of the current window (last 5 minutes), not the entire pandas range
+            midpoint_timestamp = five_mins_ago + (now - five_mins_ago) / 2
+
+            # Only show if within or close to the zoomed view
+            if (midpoint_timestamp >= min_time and midpoint_timestamp <= max_time) or (
+                abs((midpoint_timestamp - max_time).total_seconds()) < 3600
+            ):  # Within 1 hour
+
+                # Plot the prediction star
+                plt.scatter(
+                    midpoint_timestamp,
+                    pred_score,
+                    color="limegreen",
+                    s=100,
+                    marker="*",
+                    label="predicted_ds_score_regression",
+                    zorder=10,
+                )
+
+                # Add annotation
+                plt.annotate(
+                    f"Predicted: {pred_score:.2f}",
+                    xy=(midpoint_timestamp, pred_score),
+                    xytext=(10, 10),
+                    textcoords="offset points",
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8),
+                    fontsize=9,
+                )
+
+                # Shade the current window if within view
+                plt.axvspan(
+                    five_mins_ago,
+                    now,
+                    alpha=0.2,
+                    color="limegreen",
+                    label="current_window_data_range",
+                )
+
+                # Print info for debugging
+                print(f"\n=== Zoomed View Prediction Details ===")
+                print(f"Current window: {five_mins_ago} to {now}")
+                print(f"Midpoint for prediction: {midpoint_timestamp}")
+                print(f"Predicted score: {pred_score}")
+                print("=" * 50)
+        else:
+            # If no pandas data, use the latest PostgreSQL timestamp
+            midpoint_timestamp = max_time - timedelta(minutes=2.5)  # 2.5 min before max
+
+            plt.scatter(
+                midpoint_timestamp,
+                pred_score,
+                color="limegreen",
+                s=100,
+                marker="*",
+                label="predicted_ds_score_regression",
+                zorder=10,
             )
 
-            # Shade the current window
-            plt.axvspan(
-                five_mins_ago,
-                max_time,
-                alpha=0.2,
-                color="lightblue",
-                label="Current Window (5 min)",
+            # Add annotation
+            plt.annotate(
+                f"Predicted: {pred_score:.2f}",
+                xy=(midpoint_timestamp, pred_score),
+                xytext=(10, 10),
+                textcoords="offset points",
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8),
+                fontsize=9,
             )
 
     # Set titles and labels
@@ -199,18 +225,13 @@ def visualize_score_comparisons_zoomed(
 
     # Save the zoomed figure
     if save_dir:
-        import datetime
-
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         zoomed_file = os.path.join(
-            save_dir, f"{file_prefix}zoomed_{n_timestamps}_timestamps_{timestamp}.png"
+            save_dir, f"{file_prefix}zoomed_{n_timestamps}_timestamps.png"
         )
         plt.savefig(zoomed_file, dpi=300)
         logging.info(f"Saved zoomed visualization to: {zoomed_file}")
-        plt.close()
         return zoomed_file
     else:
-        plt.close()
         return None
 
 
@@ -221,366 +242,389 @@ def visualize_score_comparisons(
     pandas_status,
     postgres_status,
     save_dir=None,
-    video_id="test",
-    pattern_type="default",
+    video_id=None,
+    pattern_type=None,
 ):
     """
-    Create visualizations comparing PostgreSQL and pandas processing results.
+    Create visualizations comparing PostgreSQL and pandas data and save to files.
 
     Args:
-        postgres_data (pandas.DataFrame): Data retrieved from PostgreSQL
+        postgres_data (pandas.DataFrame): Data from PostgreSQL
         pandas_metrics (pandas.DataFrame): Metrics calculated with pandas
-        pandas_status (dict): Hot or not status calculated with pandas
-        postgres_status (dict): Hot or not status calculated with PostgreSQL
-        save_dir (str): Directory to save visualizations
-        video_id (str): Video ID for naming files
-        pattern_type (str): Activity pattern type for naming files
+        pandas_status (dict): Hot or not status from pandas processing
+        postgres_status (dict): Hot or not status from PostgreSQL processing
+        save_dir (str): Directory to save visualizations, if None, only displays them
+        video_id (str): The ID of the video for title information
+        pattern_type (str): Type of activity pattern for title information
 
     Returns:
-        list: Paths to saved visualizations
+        list: Paths to saved figure files if save_dir is provided
     """
-    import matplotlib.pyplot as plt
-    import seaborn as sns
-    from matplotlib.dates import DateFormatter
-    import numpy as np
-    import os
-    from datetime import datetime, timedelta
-    import pytz
     import logging
 
-    # Check if we have enough data to visualize
-    if postgres_data.empty or pandas_metrics.empty:
-        print("Not enough data for visualization")
-        return []
-
-    # Create output directory if it doesn't exist
+    # Create save directory if it doesn't exist
+    saved_files = []
     if save_dir and not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
-    # Set up plot style
-    plt.style.use("seaborn-v0_8-whitegrid")
-    sns.set_palette("Set2")
+    # Set seaborn style
+    sns.set_style("whitegrid")
 
-    # Check timezone settings of timestamps
-    pg_has_tz = postgres_data["timestamp_mnt"].iloc[0].tzinfo is not None
-    pd_has_tz = pandas_metrics["timestamp_mnt"].iloc[0].tzinfo is not None
-
-    print(f"PostgreSQL timestamps timezone-aware: {pg_has_tz}")
-    print(f"Pandas timestamps timezone-aware: {pd_has_tz}")
-
-    # Make pandas timestamps timezone-aware/naive to match postgres timestamps
-    if pd_has_tz != pg_has_tz:
-        pandas_metrics = pandas_metrics.copy()
-        if pg_has_tz and not pd_has_tz:
-            # Make pandas timestamps timezone-aware
-            pandas_metrics["timestamp_mnt"] = pandas_metrics["timestamp_mnt"].apply(
-                lambda x: x.replace(tzinfo=pytz.UTC)
+    # Log debug information about why reference_ds_score might be None
+    logging.info(f"Debug reference_ds_score calculation:")
+    if pandas_status["reference_predicted_avg_ds_score"] is None:
+        logging.info("  Pandas reference_ds_score is None")
+        # Check reference period data
+        one_day_ago = pandas_metrics["timestamp_mnt"].min() - timedelta(days=1)
+        five_mins_ago = pandas_metrics["timestamp_mnt"].max() - timedelta(minutes=5)
+        reference_period_data = postgres_data[
+            (postgres_data["timestamp_mnt"] >= one_day_ago)
+            & (postgres_data["timestamp_mnt"] < five_mins_ago)
+        ]
+        logging.info(f"  Reference period has {len(reference_period_data)} rows")
+        if len(reference_period_data) < 2:
+            logging.info(
+                "  Not enough data points in reference period for regression (need at least 2)"
             )
-        elif not pg_has_tz and pd_has_tz:
-            # Make pandas timestamps timezone-naive
-            pandas_metrics["timestamp_mnt"] = pandas_metrics["timestamp_mnt"].apply(
-                lambda x: x.replace(tzinfo=None)
-            )
+        else:
+            logging.info("  Enough data points but regression may have failed")
+    else:
+        logging.info(
+            f"  Pandas reference_ds_score = {pandas_status['reference_predicted_avg_ds_score']}"
+        )
 
-    # Figure 1: DS Score over time with hot status
-    fig, ax = plt.subplots(figsize=(12, 6))
+    if postgres_status["reference_predicted_avg_ds_score"] is None:
+        logging.info("  PostgreSQL reference_ds_score is None")
+    else:
+        logging.info(
+            f"  PostgreSQL reference_ds_score = {postgres_status['reference_predicted_avg_ds_score']}"
+        )
 
+    # Create a title with pattern and video information if provided
+    title_prefix = ""
+    if pattern_type and video_id:
+        title_prefix = f"{pattern_type.capitalize()} Pattern - {video_id}\n"
+
+    # Create a unique file prefix for this video and pattern
+    file_prefix = f"{video_id}_{pattern_type}_"
+
+    # ===== Create a combined figure with both plots =====
+    # Create figure with 2 subplots (1 row, 2 columns)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 8))
+
+    # --- Left subplot: DS scores over time trend line ---
     # Plot PostgreSQL data
-    ax.plot(
-        postgres_data["timestamp_mnt"],
-        postgres_data["ds_score"],
-        marker="o",
-        linestyle="-",
-        alpha=0.7,
-        label="PostgreSQL DS Score",
+    sns.lineplot(
+        x=postgres_data["timestamp_mnt"],
+        y=postgres_data["ds_score"],
+        label="historical_ds_score",
+        color="navy",
+        ax=ax1,
     )
 
-    # Plot pandas data
-    ax.plot(
-        pandas_metrics["timestamp_mnt"],
-        pandas_metrics["ds_score"],
-        marker="x",
-        linestyle="--",
-        alpha=0.7,
-        label="Pandas DS Score",
-    )
+    # Print pandas data points before plotting
+    if not pandas_metrics.empty:
+        # Print the pandas data points that will be plotted in red
+        print("\n=== Pandas DS Score Data Points (Crimson Line) ===")
+        print("Number of data points:", len(pandas_metrics))
+        print("\nTimestamp and DS Score values:")
+        for idx, row in pandas_metrics.iterrows():
+            print(f"Timestamp: {row['timestamp_mnt']}, DS Score: {row['ds_score']}")
 
-    # Mark current window and hot/not hot status based on PostgreSQL data timestamps
-    if postgres_status and postgres_status.get("current_avg_ds_score") is not None:
-        # For the current window, find the most recent timestamps in postgres_data
-        postgres_data_sorted = postgres_data.sort_values("timestamp_mnt")
-        latest_timestamp = postgres_data_sorted["timestamp_mnt"].max()
-        window_start = latest_timestamp - timedelta(minutes=5)
+        # Print any additional relevant variables
+        print("\nPandas Status Variables:")
+        for key, value in pandas_status.items():
+            print(f"{key}: {value}")
+        print("=" * 50)
 
-        current_window_pg = postgres_data[
-            (postgres_data["timestamp_mnt"] >= window_start)
-            & (postgres_data["timestamp_mnt"] <= latest_timestamp)
+        # Get the time range of pandas data
+        pandas_min_time = pandas_metrics["timestamp_mnt"].min()
+        pandas_max_time = pandas_metrics["timestamp_mnt"].max()
+
+        # Extract minute-level timestamps from pandas data for better matching
+        # with PostgreSQL's minute-level granularity
+        pandas_min_minute = pandas_min_time.replace(second=0, microsecond=0)
+        pandas_max_minute = (pandas_max_time + timedelta(minutes=1)).replace(
+            second=0, microsecond=0
+        )
+
+        print(f"\n=== Looking for PostgreSQL data at minute level ===")
+        print(f"Original pandas time range: {pandas_min_time} to {pandas_max_time}")
+        print(f"Minute-level search range: {pandas_min_minute} to {pandas_max_minute}")
+
+        # Filter PostgreSQL data for the minute-level time range
+        postgres_recent = postgres_data[
+            (postgres_data["timestamp_mnt"] >= pandas_min_minute)
+            & (postgres_data["timestamp_mnt"] <= pandas_max_minute)
         ]
 
-        if not current_window_pg.empty:
-            # Highlight current window
-            ax.axvspan(
-                current_window_pg["timestamp_mnt"].min(),
-                current_window_pg["timestamp_mnt"].max(),
-                alpha=0.2,
-                color="lightblue",
-                label="Current Window (5 min)",
+        # If we don't find matching PostgreSQL data, plot the most recent 5 minutes instead
+        if postgres_recent.empty:
+            print(
+                "\nNo PostgreSQL data points found for the same time range as pandas data"
             )
+            print("Plotting the most recent 5 minutes of PostgreSQL data instead...")
 
-            # Add horizontal line for current avg DS score
-            ax.axhline(
-                y=postgres_status["current_avg_ds_score"],
-                color="blue",
-                linestyle=":",
-                label=f'Current Avg DS Score: {postgres_status["current_avg_ds_score"]:.4f}',
+            # Find the most recent timestamp in PostgreSQL data
+            postgres_max_time = postgres_data["timestamp_mnt"].max()
+            postgres_min_time = postgres_max_time - timedelta(minutes=5)
+
+            # Get PostgreSQL data for the most recent 5 minutes
+            postgres_recent = postgres_data[
+                postgres_data["timestamp_mnt"] >= postgres_min_time
+            ]
+
+            print(
+                f"Using PostgreSQL data from {postgres_min_time} to {postgres_max_time}"
             )
+            print(f"Found {len(postgres_recent)} points in this range")
 
-            # Add horizontal line for reference predicted DS score
-            if postgres_status["reference_predicted_avg_ds_score"] is not None:
-                ax.axhline(
-                    y=postgres_status["reference_predicted_avg_ds_score"],
-                    color="red",
-                    linestyle=":",
-                    label=f'Reference Predicted DS Score: {postgres_status["reference_predicted_avg_ds_score"]:.4f}',
+            # Print a sample of the data to verify
+            if not postgres_recent.empty:
+                print("\nSample of PostgreSQL data points being plotted:")
+                for idx, row in postgres_recent.head(3).iterrows():
+                    print(
+                        f"  Timestamp: {row['timestamp_mnt']}, DS Score: {row['ds_score']}"
+                    )
+
+        # Plot PostgreSQL data for the selected time period
+        if not postgres_recent.empty:
+            sns.lineplot(
+                x=postgres_recent["timestamp_mnt"],
+                y=postgres_recent["ds_score"],
+                label="src_postgres_ds_score",
+                color="gold",
+                alpha=1.0,
+                linewidth=3,
+                zorder=5,
+                ax=ax1,
+            )
+            print(f"\nPlotted {len(postgres_recent)} PostgreSQL points")
+        else:
+            print("\nNo PostgreSQL data points found to plot")
+
+        # Plot pandas data
+        sns.lineplot(
+            x=pandas_metrics["timestamp_mnt"],
+            y=pandas_metrics["ds_score"],
+            label="sim_pandas_ds_score",
+            color="crimson",
+            linestyle="--",
+            ax=ax1,
+        )
+
+        # Plot the predicted score from linear regression if available
+        if pandas_status["reference_predicted_avg_ds_score"] is not None:
+            # Get the reference predicted score
+            pred_score = pandas_status["reference_predicted_avg_ds_score"]
+
+            # Use the actual pandas data timestamps instead of system time
+            # Get the min and max timestamps from pandas_metrics
+            if not pandas_metrics.empty:
+                # Use the actual pandas data time range
+                min_time = pandas_metrics["timestamp_mnt"].min()
+                max_time = pandas_metrics["timestamp_mnt"].max()
+
+                # Calculate midpoint based on the actual data instead of system time
+                midpoint_timestamp = min_time + (max_time - min_time) / 2
+
+                # Define a five minute window around our data
+                now = max_time
+                five_mins_ago = max(min_time, now - timedelta(minutes=5))
+
+                print("\n=== Actual Pandas Data Time Range ===")
+                print(f"Min timestamp: {min_time}")
+                print(f"Max timestamp: {max_time}")
+                print(f"Using midpoint: {midpoint_timestamp}")
+                print("=" * 50)
+
+                # Plot a specific point at the midpoint timestamp and predicted score
+                ax1.scatter(
+                    midpoint_timestamp,
+                    pred_score,
+                    color="limegreen",
+                    s=100,  # Size of marker
+                    marker="*",  # Star marker
+                    label="predicted_ds_score_regression",
+                    zorder=10,  # Make sure it's on top
                 )
 
-    # Add hot status to title (without emojis to avoid font issues)
-    title = f"DS Score Over Time - {pattern_type.capitalize()} Pattern\n"
-    if postgres_status and postgres_status.get("hot_or_not") is not None:
-        hot_status = "HOT" if postgres_status["hot_or_not"] else "NOT HOT"
-        title += f"PostgreSQL Status: {hot_status}"
+                # Add annotation showing exact values
+                ax1.annotate(
+                    f"Predicted: {pred_score:.2f}",
+                    xy=(midpoint_timestamp, pred_score),
+                    xytext=(10, 10),  # Offset text by 10 points
+                    textcoords="offset points",
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8),
+                    fontsize=9,
+                )
 
-    if pandas_status and pandas_status.get("hot_or_not") is not None:
-        pandas_hot = "HOT" if pandas_status["hot_or_not"] else "NOT HOT"
-        title += f" | Pandas Status: {pandas_hot}"
+                # Shade the data range where this prediction applies
+                # Add light green shading for the current window
+                ax1.axvspan(
+                    five_mins_ago,
+                    now,
+                    alpha=0.2,
+                    color="limegreen",
+                    label="current_window_data_range",
+                )
 
-    ax.set_title(title)
-    ax.set_xlabel("Time")
-    ax.set_ylabel("DS Score")
-    ax.legend(loc="best")
-    ax.grid(True, alpha=0.3)
+                # Print the current window details
+                print("\n=== Prediction Window ===")
+                print(f"Start: {five_mins_ago}")
+                print(f"End: {now}")
+                print(f"Midpoint: {midpoint_timestamp}")
+                print(f"Predicted DS Score: {pred_score}")
+                print("=" * 50)
+            else:
+                # Fallback for empty pandas data
+                print("\nNo pandas data points to align prediction with.")
 
-    # Format x-axis dates
-    date_format = DateFormatter("%H:%M")
-    ax.xaxis.set_major_formatter(date_format)
-    plt.xticks(rotation=45)
+                # If no pandas data, use postgres data for visualization
+                min_time = postgres_data["timestamp_mnt"].min()
+                max_time = postgres_data["timestamp_mnt"].max()
+                midpoint_timestamp = (
+                    min_time + (max_time - min_time) * 0.9
+                )  # Near the end
 
-    plt.tight_layout()
+                ax1.scatter(
+                    midpoint_timestamp,
+                    pred_score,
+                    color="limegreen",
+                    s=100,  # Size of marker
+                    marker="*",  # Star marker
+                    label="predicted_ds_score_regression",
+                    zorder=10,  # Make sure it's on top
+                )
 
-    # Save the plot if directory is provided
-    saved_files = []
-    if save_dir:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = os.path.join(
-            save_dir, f"{video_id}_{pattern_type}_ds_score_{timestamp}.png"
-        )
-        plt.savefig(filename, dpi=300, bbox_inches="tight")
-        saved_files.append(filename)
-        print(f"Saved DS score plot to {filename}")
+                # Add annotation
+                ax1.annotate(
+                    f"Predicted: {pred_score:.2f}",
+                    xy=(midpoint_timestamp, pred_score),
+                    xytext=(10, 10),  # Offset text by 10 points
+                    textcoords="offset points",
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8),
+                    fontsize=9,
+                )
+        else:
+            print("\nNo predicted score available from linear regression.")
 
-    # Figure 2: Cumulative metrics over time
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-    axes = axes.flatten()
+    ax1.set_title(f"{title_prefix}DS Score Trend Comparison", fontsize=14)
+    ax1.set_xlabel("Time", fontsize=12)
+    ax1.set_ylabel("DS Score", fontsize=12)
+    ax1.legend(loc="best")
 
-    # Plot 1: Cumulative Like CTR
-    axes[0].plot(
-        postgres_data["timestamp_mnt"],
-        postgres_data["cumulative_like_ctr"],
-        marker="o",
-        linestyle="-",
-        alpha=0.7,
-        label="PostgreSQL",
-    )
-    axes[0].plot(
-        pandas_metrics["timestamp_mnt"],
-        pandas_metrics["cumulative_like_ctr"],
-        marker="x",
-        linestyle="--",
-        alpha=0.7,
-        label="Pandas",
-    )
-    axes[0].set_title("Cumulative Like CTR")
-    axes[0].set_xlabel("Time")
-    axes[0].set_ylabel("CTR (%)")
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
+    # Rotate x-axis labels for better readability
+    plt.setp(ax1.get_xticklabels(), rotation=45, ha="right")
 
-    # Plot 2: Cumulative Average Watch Percentage
-    axes[1].plot(
-        postgres_data["timestamp_mnt"],
-        postgres_data["cumulative_average_percentage_watched"],
-        marker="o",
-        linestyle="-",
-        alpha=0.7,
-        label="PostgreSQL",
-    )
-    axes[1].plot(
-        pandas_metrics["timestamp_mnt"],
-        pandas_metrics["cumulative_average_percentage_watched"],
-        marker="x",
-        linestyle="--",
-        alpha=0.7,
-        label="Pandas",
-    )
-    axes[1].set_title("Cumulative Average Watch Percentage")
-    axes[1].set_xlabel("Time")
-    axes[1].set_ylabel("Watch Percentage")
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-
-    # Plot 3: Normalized Metrics
-    axes[2].plot(
-        postgres_data["timestamp_mnt"],
-        postgres_data["normalized_cumulative_like_ctr"],
-        marker="o",
-        linestyle="-",
-        alpha=0.7,
-        label="PostgreSQL Norm CTR",
-    )
-    axes[2].plot(
-        postgres_data["timestamp_mnt"],
-        postgres_data["normalized_cumulative_watch_percentage"],
-        marker="s",
-        linestyle="-",
-        alpha=0.7,
-        label="PostgreSQL Norm Watch %",
-    )
-    axes[2].plot(
-        pandas_metrics["timestamp_mnt"],
-        pandas_metrics["normalized_cumulative_like_ctr"],
-        marker="x",
-        linestyle="--",
-        alpha=0.7,
-        label="Pandas Norm CTR",
-    )
-    axes[2].plot(
-        pandas_metrics["timestamp_mnt"],
-        pandas_metrics["normalized_cumulative_watch_percentage"],
-        marker="+",
-        linestyle="--",
-        alpha=0.7,
-        label="Pandas Norm Watch %",
-    )
-    axes[2].set_title("Normalized Metrics")
-    axes[2].set_xlabel("Time")
-    axes[2].set_ylabel("Normalized Value")
-    axes[2].legend()
-    axes[2].grid(True, alpha=0.3)
-
-    # Plot 4: Regression for Reference Period
-    # Get the reference period data (1 day ago to 5 mins ago)
-    postgres_data_sorted = postgres_data.sort_values("timestamp_mnt")
-    latest_timestamp = postgres_data_sorted["timestamp_mnt"].max()
-    five_mins_ago = latest_timestamp - timedelta(minutes=5)
-    one_day_ago = latest_timestamp - timedelta(days=1)
-
-    reference_period_pg = postgres_data[
-        (postgres_data["timestamp_mnt"] >= one_day_ago)
-        & (postgres_data["timestamp_mnt"] < five_mins_ago)
-    ]
-
-    if len(reference_period_pg) >= 2:
-        # Convert timestamps to epoch seconds for regression
-        reference_period_pg = reference_period_pg.copy()
-        reference_period_pg["timestamp_seconds"] = reference_period_pg[
-            "timestamp_mnt"
-        ].apply(lambda x: x.timestamp())
-
-        # Perform simple linear regression
-        from scipy import stats
-
-        slope, intercept, r_value, p_value, std_err = stats.linregress(
-            reference_period_pg["timestamp_seconds"], reference_period_pg["ds_score"]
+    # --- Right subplot: Bar comparison for current and reference scores ---
+    # Check if we have data for bar chart
+    if (
+        pandas_status["current_avg_ds_score"] is not None
+        and postgres_status["current_avg_ds_score"] is not None
+    ):
+        # Create DataFrame for better seaborn integration
+        comp_data = pd.DataFrame(
+            {
+                "Metric": [
+                    "current_ds_score",
+                    "current_ds_score",
+                    "reference_ds_score",
+                    "reference_ds_score",
+                ],
+                "Implementation": [
+                    "sim_pandas",
+                    "postgresql",
+                    "sim_pandas",
+                    "postgresql",
+                ],
+                "Value": [
+                    pandas_status["current_avg_ds_score"],
+                    postgres_status["current_avg_ds_score"],
+                    (
+                        pandas_status["reference_predicted_avg_ds_score"]
+                        if pandas_status["reference_predicted_avg_ds_score"] is not None
+                        else 0
+                    ),
+                    (
+                        postgres_status["reference_predicted_avg_ds_score"]
+                        if postgres_status["reference_predicted_avg_ds_score"]
+                        is not None
+                        else 0
+                    ),
+                ],
+            }
         )
 
-        # Generate points for regression line
-        x_range = np.linspace(
-            reference_period_pg["timestamp_seconds"].min(),
-            reference_period_pg["timestamp_seconds"].max(),
-            100,
-        )
-        y_pred = slope * x_range + intercept
-
-        # Convert back to datetime for plotting
-        x_dates = [datetime.fromtimestamp(x) for x in x_range]
-        if pg_has_tz:
-            x_dates = [x.replace(tzinfo=pytz.UTC) for x in x_dates]
-
-        # Plot reference period data points
-        axes[3].scatter(
-            reference_period_pg["timestamp_mnt"],
-            reference_period_pg["ds_score"],
-            marker="o",
-            alpha=0.7,
-            label="Reference Period Data",
+        # Create grouped bar chart
+        bar_plot = sns.barplot(
+            x="Metric",
+            y="Value",
+            hue="Implementation",
+            data=comp_data,
+            palette=["crimson", "navy"],
+            ax=ax2,
         )
 
-        # Plot regression line
-        axes[3].plot(
-            x_dates, y_pred, "r-", label=f"Regression Line (slope={slope:.6f})"
-        )
+        # Add values on top of the bars
+        for bar in bar_plot.containers:
+            bar_plot.bar_label(bar, fmt="%.2f")
 
-        # If we have current scores, plot them for comparison
-        if postgres_status and postgres_status.get("current_avg_ds_score") is not None:
-            # Calculate midpoint of current window
-            midpoint_time = five_mins_ago + (latest_timestamp - five_mins_ago) / 2
+        # Annotate None values
+        for i, val in enumerate(comp_data["Value"]):
+            if i >= 2 and (  # Only for reference DS scores
+                (i == 2 and pandas_status["reference_predicted_avg_ds_score"] is None)
+                or (
+                    i == 3
+                    and postgres_status["reference_predicted_avg_ds_score"] is None
+                )
+            ):
+                bar_plot.annotate(
+                    "None",
+                    xy=(i % 2, 0.1),  # Position at the bottom of the bar
+                    ha="center",
+                    va="bottom",
+                    color="red",
+                    fontweight="bold",
+                )
 
-            # Calculate predicted value at midpoint
-            midpoint_seconds = midpoint_time.timestamp()
-            predicted_value = slope * midpoint_seconds + intercept
-
-            # Plot predicted value
-            axes[3].scatter(
-                [midpoint_time],
-                [predicted_value],
-                marker="*",
-                s=150,
-                color="red",
-                label=f"Predicted Value: {predicted_value:.4f}",
-            )
-
-            # Plot actual average
-            axes[3].scatter(
-                [midpoint_time],
-                [postgres_status["current_avg_ds_score"]],
-                marker="*",
-                s=150,
-                color="blue",
-                label=f'Actual Avg: {postgres_status["current_avg_ds_score"]:.4f}',
-            )
-
-        axes[3].set_title("Reference Period Regression")
-        axes[3].set_xlabel("Time")
-        axes[3].set_ylabel("DS Score")
-        axes[3].legend()
-        axes[3].grid(True, alpha=0.3)
+        ax2.set_title(f"{title_prefix}current_vs_reference_ds_score", fontsize=14)
+        ax2.set_ylabel("DS Score", fontsize=12)
+        ax2.legend(title="Implementation", loc="upper right")
     else:
-        axes[3].text(
+        # If no data for bar chart, display a message
+        ax2.text(
             0.5,
             0.5,
-            "Not enough data points for regression",
+            "No current DS score data available",
             horizontalalignment="center",
             verticalalignment="center",
-            transform=axes[3].transAxes,
+            transform=ax2.transAxes,
+            fontsize=14,
         )
+        ax2.set_title(f"{title_prefix}current_vs_reference_ds_score", fontsize=14)
 
-    # Format x-axis dates for all subplots
-    for ax in axes:
-        ax.xaxis.set_major_formatter(date_format)
-        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45)
-
+    # Adjust layout and save combined figure
     plt.tight_layout()
 
-    # Save the plot if directory is provided
     if save_dir:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = os.path.join(
-            save_dir, f"{video_id}_{pattern_type}_metrics_{timestamp}.png"
+        combined_file = os.path.join(save_dir, f"{file_prefix}combined_comparison.png")
+        plt.savefig(combined_file, dpi=300)
+        saved_files.append(combined_file)
+
+    # Call the zoomed visualization after creating the main visualization
+    if save_dir:
+        zoomed_file = visualize_score_comparisons_zoomed(
+            postgres_data,
+            pandas_metrics,
+            pandas_status,
+            postgres_status,
+            save_dir=save_dir,
+            video_id=video_id,
+            pattern_type=pattern_type,
+            n_timestamps=100,
         )
-        plt.savefig(filename, dpi=300, bbox_inches="tight")
-        saved_files.append(filename)
-        print(f"Saved metrics plot to {filename}")
+        if zoomed_file:
+            saved_files.append(zoomed_file)
 
-    plt.close("all")  # Close all figures to prevent memory leaks
-
-    return saved_files
+    return saved_files if save_dir else None

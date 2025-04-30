@@ -144,163 +144,252 @@ def process_with_pandas(events_df, conn_string=conn_string):
     Returns:
         tuple: (minute_metrics_df, hot_or_not_status)
     """
-    # Get basic info for logging
+    # First, query historical data from the database
     video_id = events_df["video_id"].iloc[0]
-    start_timestamp = events_df["timestamp_mnt"].min()
+    start_timestamp = events_df["timestamp_mnt"].min() - timedelta(days=1)
     end_timestamp = events_df["timestamp_mnt"].max()
 
-    print(f"Processing data from {start_timestamp} to {end_timestamp} with pandas")
+    print(f"Querying historical data from {start_timestamp} to {end_timestamp}")
 
-    # Sort events by timestamp
-    events_df_sorted = events_df.sort_values("timestamp_mnt")
+    # Get historical data from the database
+    historical_data = pd.DataFrame()
+    try:
+        # Connect to database
+        from sqlalchemy import create_engine
 
-    # Group into 5-minute batches
-    if len(events_df_sorted) > 0:
-        # Get min and max timestamps
-        min_timestamp = events_df_sorted["timestamp_mnt"].min()
-        max_timestamp = events_df_sorted["timestamp_mnt"].max()
+        # Convert psycopg conn_string to SQLAlchemy format
+        db_params = {
+            param.split("=")[0]: param.split("=")[1]
+            for param in conn_string.split()
+            if "=" in param
+        }
+        sqlalchemy_uri = f"postgresql://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['dbname']}"
+        engine = create_engine(sqlalchemy_uri)
 
-        # Generate 5-minute intervals
-        current_timestamp = min_timestamp
-        time_batches = []
+        # Query existing data
+        query = """
+        SELECT video_id, timestamp_mnt, like_count_mnt, watch_count_mnt,
+               average_percentage_watched_mnt, cumulative_like_count,
+               cumulative_watch_count, cumulative_like_ctr,
+               cumulative_average_percentage_watched, ds_score
+        FROM hot_or_not_evaluator.video_engagement_relation
+        WHERE video_id = %s AND timestamp_mnt < %s
+        ORDER BY timestamp_mnt
+        """
+        historical_data = pd.read_sql_query(
+            query, engine, params=(video_id, events_df["timestamp_mnt"].min())
+        )
+        print(f"Retrieved {len(historical_data)} historical records")
 
-        while current_timestamp <= max_timestamp:
-            next_timestamp = current_timestamp + timedelta(minutes=5)
-            batch = events_df_sorted[
-                (events_df_sorted["timestamp_mnt"] >= current_timestamp)
-                & (events_df_sorted["timestamp_mnt"] < next_timestamp)
-            ]
+        # Check timezone awareness of historical data
+        if len(historical_data) > 0:
+            historical_tz_aware = (
+                historical_data["timestamp_mnt"].iloc[0].tzinfo is not None
+            )
+            print(
+                f"Historical data timestamps are {'timezone-aware' if historical_tz_aware else 'timezone-naive'}"
+            )
 
-            if not batch.empty:
-                time_batches.append(batch)
+            # Check timezone awareness of new events
+            events_tz_aware = events_df["timestamp_mnt"].iloc[0].tzinfo is not None
+            print(
+                f"New events timestamps are {'timezone-aware' if events_tz_aware else 'timezone-naive'}"
+            )
 
-            current_timestamp = next_timestamp
+            # Make timestamps consistent
+            if historical_tz_aware != events_tz_aware:
+                print("Converting timestamps to consistent timezone awareness")
+                if historical_tz_aware and not events_tz_aware:
+                    # Convert events to timezone-aware
+                    import pytz
 
-        print(f"Created {len(time_batches)} time-based batches (5-minute intervals)")
+                    events_df = events_df.copy()
+                    events_df["timestamp_mnt"] = events_df["timestamp_mnt"].apply(
+                        lambda x: x.replace(tzinfo=pytz.UTC)
+                    )
+                elif not historical_tz_aware and events_tz_aware:
+                    # Convert historical to timezone-aware
+                    import pytz
+
+                    historical_data = historical_data.copy()
+                    historical_data["timestamp_mnt"] = historical_data[
+                        "timestamp_mnt"
+                    ].apply(lambda x: x.replace(tzinfo=pytz.UTC))
+
+    except Exception as e:
+        print(f"Error retrieving historical data: {e}")
+
+    # 1. Aggregate data by minute for new events
+    minute_agg = (
+        events_df.groupby(["video_id", "timestamp_mnt"])
+        .agg(
+            like_count_mnt=("liked", lambda x: sum(x)),
+            watch_count_mnt=("liked", "count"),
+            average_percentage_watched_mnt=("watch_percentage", "mean"),
+        )
+        .reset_index()
+    )
+
+    # 2. Calculate minute metrics
+    minute_agg["like_ctr_mnt"] = minute_agg.apply(
+        lambda row: (
+            (row["like_count_mnt"] * 100 / row["watch_count_mnt"])
+            if row["watch_count_mnt"] > 0
+            else 0
+        ),
+        axis=1,
+    )
+
+    # 3. Create a copy for cumulative calculations to avoid SettingWithCopyWarning
+    minute_metrics = minute_agg.copy()
+
+    # Sort by timestamp to ensure proper cumulative calculations
+    minute_metrics = minute_metrics.sort_values("timestamp_mnt")
+
+    # 4. Calculate cumulative metrics
+    video_id = minute_metrics["video_id"].iloc[
+        0
+    ]  # Assuming all rows have the same video_id
+
+    # Get previous cumulative values from historical data
+    previous_cumulative = {}
+    if not historical_data.empty:
+        last_row = historical_data.iloc[-1]
+        previous_cumulative = {
+            "cumulative_like_count": last_row["cumulative_like_count"],
+            "cumulative_watch_count": last_row["cumulative_watch_count"],
+            "cumulative_watched_sum": last_row["cumulative_average_percentage_watched"]
+            * last_row["cumulative_watch_count"],
+        }
     else:
-        time_batches = []
-        print("No events to process")
+        # If no historical data, get from database function
+        previous_cumulative = get_previous_cumulative_metrics(video_id)
 
-    # Get previous cumulative metrics from database - EXACT MATCH to update_counter
-    previous_cumulative = get_previous_cumulative_metrics(video_id)
-    print(f"Previous cumulative metrics: {previous_cumulative}")
-
-    # Initialize DataFrame to store minute-level metrics
-    minute_metrics = pd.DataFrame()
-
-    # Initialize cumulative counters with previous values
+    # Initialize cumulative counters with previous values or zeros
     cumulative_like_count = previous_cumulative.get("cumulative_like_count", 0)
     cumulative_watch_count = previous_cumulative.get("cumulative_watch_count", 0)
     cumulative_watched_sum = previous_cumulative.get("cumulative_watched_sum", 0)
 
-    # Process each 5-minute batch
-    for batch_idx, batch_df in enumerate(time_batches):
-        batch_start_time = batch_df["timestamp_mnt"].min()
-        batch_end_time = batch_df["timestamp_mnt"].max()
-        print(
-            f"Processing batch {batch_idx+1}/{len(time_batches)} with {len(batch_df)} events "
-            f"({batch_start_time} to {batch_end_time})"
+    # Arrays to store calculated metrics
+    cumulative_like_counts = []
+    cumulative_watch_counts = []
+    cumulative_like_ctrs = []
+    cumulative_avg_watch_pcts = []
+    norm_like_ctrs = []
+    norm_watch_pcts = []
+    harmonic_means = []
+    ds_scores = []
+
+    # Calculate cumulative metrics for each minute
+    for idx, row in minute_metrics.iterrows():
+        # Update cumulative counters
+        cumulative_like_count += row["like_count_mnt"]
+        cumulative_watch_count += row["watch_count_mnt"]
+        cumulative_watched_sum += (
+            row["average_percentage_watched_mnt"] * row["watch_count_mnt"]
         )
 
-        # 1. Aggregate data by minute (GROUP BY) - EXACT MATCH to update_counter
-        batch_minute_agg = (
-            batch_df.groupby(["video_id", "timestamp_mnt"])
-            .agg(
-                like_count_mnt=("liked", lambda x: sum(x)),
-                watch_count_mnt=("liked", "count"),
-                average_percentage_watched_mnt=("watch_percentage", "mean"),
+        # Calculate derived metrics
+        cumulative_avg_watch_pct = (
+            cumulative_watched_sum / cumulative_watch_count
+            if cumulative_watch_count > 0
+            else 0
+        )
+        cumulative_like_ctr = (
+            (cumulative_like_count * 100 / cumulative_watch_count)
+            if cumulative_watch_count > 0
+            else 0
+        )
+
+        # Normalize metrics
+        norm_like_ctr = max(0, (cumulative_like_ctr - LIKE_CTR_CENTER) / LIKE_CTR_RANGE)
+        norm_watch_pct = max(
+            0,
+            (cumulative_avg_watch_pct - WATCH_PERCENTAGE_CENTER)
+            / WATCH_PERCENTAGE_RANGE,
+        )
+
+        # Calculate harmonic mean and ds_score
+        harmonic_mean = ((norm_like_ctr + 1) * (norm_watch_pct + 1)) / (
+            norm_like_ctr + norm_watch_pct + 2
+        )
+        ds_score = harmonic_mean - 1
+
+        # Store metrics for this minute
+        cumulative_like_counts.append(cumulative_like_count)
+        cumulative_watch_counts.append(cumulative_watch_count)
+        cumulative_like_ctrs.append(cumulative_like_ctr)
+        cumulative_avg_watch_pcts.append(cumulative_avg_watch_pct)
+        norm_like_ctrs.append(norm_like_ctr)
+        norm_watch_pcts.append(norm_watch_pct)
+        harmonic_means.append(harmonic_mean)
+        ds_scores.append(ds_score)
+
+    # Assign computed values to the dataframe
+    minute_metrics["cumulative_like_count"] = cumulative_like_counts
+    minute_metrics["cumulative_watch_count"] = cumulative_watch_counts
+    minute_metrics["cumulative_like_ctr"] = cumulative_like_ctrs
+    minute_metrics["cumulative_average_percentage_watched"] = cumulative_avg_watch_pcts
+    minute_metrics["normalized_cumulative_like_ctr"] = norm_like_ctrs
+    minute_metrics["normalized_cumulative_watch_percentage"] = norm_watch_pcts
+    minute_metrics["harmonic_mean_of_like_count_and_watch_count"] = harmonic_means
+    minute_metrics["ds_score"] = ds_scores
+
+    # 5. Combine historical data with new minute metrics for hot_or_not computation
+    combined_metrics = pd.DataFrame()
+
+    # Check if historical data has any rows
+    if not historical_data.empty:
+        # Ensure consistent timezone awareness before combining
+        if len(historical_data) > 0 and len(minute_metrics) > 0:
+            historical_tz_aware = (
+                historical_data["timestamp_mnt"].iloc[0].tzinfo is not None
             )
-            .reset_index()
-        )
-
-        # 2. Calculate minute-level CTR - EXACT MATCH to update_counter
-        batch_minute_agg["like_ctr_mnt"] = batch_minute_agg.apply(
-            lambda row: (
-                (row["like_count_mnt"] * 100 / row["watch_count_mnt"])
-                if row["watch_count_mnt"] > 0
-                else 0
-            ),
-            axis=1,
-        )
-
-        # Sort by timestamp to ensure proper processing
-        batch_minute_agg = batch_minute_agg.sort_values("timestamp_mnt")
-
-        # 3. Calculate cumulative metrics for each minute - EXACT MATCH to update_counter logic
-        for idx, row in batch_minute_agg.iterrows():
-            # Update cumulative counters (adding current minute to previous cumulative)
-            new_cumulative_like_count = cumulative_like_count + row["like_count_mnt"]
-            new_cumulative_watch_count = cumulative_watch_count + row["watch_count_mnt"]
-            new_cumulative_watched_sum = cumulative_watched_sum + (
-                row["average_percentage_watched_mnt"] * row["watch_count_mnt"]
+            minute_metrics_tz_aware = (
+                minute_metrics["timestamp_mnt"].iloc[0].tzinfo is not None
             )
 
-            # Calculate derived metrics - EXACT MATCH to update_counter
-            if new_cumulative_watch_count > 0:
-                # Calculate new cumulative average percentage watched
-                cumulative_avg_watch_pct = (
-                    new_cumulative_watched_sum / new_cumulative_watch_count
+            # Convert timestamps to ensure consistency
+            if historical_tz_aware != minute_metrics_tz_aware:
+                print(
+                    f"Making timestamps consistent for combination: historical={historical_tz_aware}, metrics={minute_metrics_tz_aware}"
                 )
+                if historical_tz_aware:
+                    # Convert minute_metrics to match historical
+                    import pytz
 
-                # Calculate new cumulative like CTR
-                cumulative_like_ctr = (
-                    new_cumulative_like_count * 100 / new_cumulative_watch_count
-                )
-            else:
-                cumulative_avg_watch_pct = 0
-                cumulative_like_ctr = 0
+                    minute_metrics = minute_metrics.copy()
+                    minute_metrics["timestamp_mnt"] = minute_metrics[
+                        "timestamp_mnt"
+                    ].apply(
+                        lambda x: x.replace(tzinfo=pytz.UTC) if x.tzinfo is None else x
+                    )
+                else:
+                    # Convert historical to match minute_metrics
+                    historical_data = historical_data.copy()
+                    historical_data["timestamp_mnt"] = historical_data[
+                        "timestamp_mnt"
+                    ].apply(
+                        lambda x: x.replace(tzinfo=None) if x.tzinfo is not None else x
+                    )
 
-            # Normalize metrics - EXACT MATCH to update_counter
-            norm_like_ctr = max(
-                0, (cumulative_like_ctr - LIKE_CTR_CENTER) / LIKE_CTR_RANGE
-            )
-            norm_watch_pct = max(
-                0,
-                (cumulative_avg_watch_pct - WATCH_PERCENTAGE_CENTER)
-                / WATCH_PERCENTAGE_RANGE,
-            )
-
-            # Calculate harmonic mean - EXACT MATCH to update_counter formula
-            harmonic_mean = ((norm_like_ctr + 1) * (norm_watch_pct + 1)) / (
-                norm_like_ctr + norm_watch_pct + 2
-            )
-            ds_score = harmonic_mean - 1
-
-            # Update the row with calculated values
-            batch_minute_agg.at[idx, "cumulative_like_count"] = (
-                new_cumulative_like_count
-            )
-            batch_minute_agg.at[idx, "cumulative_watch_count"] = (
-                new_cumulative_watch_count
-            )
-            batch_minute_agg.at[idx, "cumulative_like_ctr"] = cumulative_like_ctr
-            batch_minute_agg.at[idx, "cumulative_average_percentage_watched"] = (
-                cumulative_avg_watch_pct
-            )
-            batch_minute_agg.at[idx, "normalized_cumulative_like_ctr"] = norm_like_ctr
-            batch_minute_agg.at[idx, "normalized_cumulative_watch_percentage"] = (
-                norm_watch_pct
-            )
-            batch_minute_agg.at[idx, "harmonic_mean_of_like_count_and_watch_count"] = (
-                harmonic_mean
-            )
-            batch_minute_agg.at[idx, "ds_score"] = ds_score
-
-            # Update cumulative counters for next minute
-            cumulative_like_count = new_cumulative_like_count
-            cumulative_watch_count = new_cumulative_watch_count
-            cumulative_watched_sum = new_cumulative_watched_sum
-
-        # Append batch metrics to overall metrics
-        minute_metrics = pd.concat(
-            [minute_metrics, batch_minute_agg], ignore_index=True
+        # Select only needed columns from historical data
+        historical_subset = historical_data[["video_id", "timestamp_mnt", "ds_score"]]
+        # Combine with new metrics
+        combined_metrics = pd.concat(
+            [
+                historical_subset,
+                minute_metrics[["video_id", "timestamp_mnt", "ds_score"]],
+            ]
         )
+    else:
+        combined_metrics = minute_metrics[["video_id", "timestamp_mnt", "ds_score"]]
 
-        print(f"Processed batch {batch_idx+1}/{len(time_batches)} with pandas")
+    # Ensure timestamps are sorted - this is where the error was occurring
+    combined_metrics = combined_metrics.sort_values("timestamp_mnt")
 
-    # After processing all batches, compute the hot-or-not status
-    print("Computing hot-or-not status with pandas...")
-    hot_or_not_status = compute_hot_or_not_pandas(minute_metrics, video_id)
+    # 6. Simulate compute_hot_or_not procedure with combined data
+    hot_or_not_status = compute_hot_or_not_pandas(combined_metrics, video_id)
 
     return minute_metrics, hot_or_not_status
 
@@ -365,7 +454,7 @@ def compute_hot_or_not_pandas(minute_metrics, video_id):
     Returns:
         dict: Hot or not status information
     """
-    # Handle empty data case
+    # Ensure timestamps in minute_metrics are timezone-aware if they aren't already
     if minute_metrics.empty:
         return {
             "video_id": video_id,
@@ -375,30 +464,30 @@ def compute_hot_or_not_pandas(minute_metrics, video_id):
             "reference_predicted_avg_ds_score": None,
         }
 
-    # Sort by timestamp to ensure proper analysis
-    minute_metrics = minute_metrics.sort_values("timestamp_mnt")
-
-    # Check timezone awareness
+    # Check if timestamps are timezone-aware
     has_tzinfo = minute_metrics["timestamp_mnt"].iloc[0].tzinfo is not None
 
-    # Define the time windows based on data timestamps (similar to stored procedure)
-    now = minute_metrics["timestamp_mnt"].max()
-    five_mins_ago = now - timedelta(minutes=5)
-    one_day_ago = now - timedelta(days=1)
+    # Create timezone-aware now, five_mins_ago, and one_day_ago that match the data's timezone awareness
+    if has_tzinfo:
+        # Timestamps in data are timezone-aware, so use timezone-aware now
+        import pytz
 
-    print(f"Analysis time windows:")
-    print(f"  - Now: {now}")
-    print(f"  - Five minutes ago: {five_mins_ago}")
-    print(f"  - One day ago: {one_day_ago}")
+        now = datetime.now(pytz.UTC)
+        five_mins_ago = now - timedelta(minutes=5)
+        one_day_ago = now - timedelta(days=1)
+    else:
+        # Timestamps in data are timezone-naive, so use timezone-naive now
+        now = datetime.now()
+        five_mins_ago = now - timedelta(minutes=5)
+        one_day_ago = now - timedelta(days=1)
 
     # Get previous hot status (if available)
     previous_hot_status = get_previous_hot_status(video_id)
-    print(f"Previous hot status: {previous_hot_status}")
 
-    # Calculate current average ds_score (last 5 minutes) - EXACTLY like stored procedure
+    # Calculate current average ds_score (last 5 minutes)
     current_window = minute_metrics[
         (minute_metrics["timestamp_mnt"] >= five_mins_ago)
-        & (minute_metrics["timestamp_mnt"] <= now)
+        & (minute_metrics["timestamp_mnt"] < now)
     ]
 
     if len(current_window) > 0:
@@ -410,7 +499,7 @@ def compute_hot_or_not_pandas(minute_metrics, video_id):
         current_avg_ds = None
         print("No records in current window")
 
-    # Calculate reference period metrics (1 day ago to 5 mins ago) - EXACTLY like stored procedure
+    # Calculate reference period metrics (1 day ago to 5 mins ago)
     reference_period = minute_metrics[
         (minute_metrics["timestamp_mnt"] >= one_day_ago)
         & (minute_metrics["timestamp_mnt"] < five_mins_ago)
@@ -418,10 +507,10 @@ def compute_hot_or_not_pandas(minute_metrics, video_id):
 
     print(f"Reference period has {len(reference_period)} records")
 
-    # Calculate regression parameters similar to what the stored procedure does
+    # Following the SQL stored procedure approach for regression
     ref_predicted_avg_ds = None
 
-    # Perform linear regression if we have enough data points - EXACTLY like stored procedure
+    # Perform linear regression if we have enough data points
     if len(reference_period) >= 2:
         try:
             # Convert timestamps to numeric (seconds since epoch) for regression
@@ -430,41 +519,46 @@ def compute_hot_or_not_pandas(minute_metrics, video_id):
                 "timestamp_mnt"
             ].apply(lambda x: x.timestamp())
 
-            # Calculate regression parameters similar to SQL's regr_slope and regr_intercept
+            # Use the SQL regr_slope and regr_intercept approach
             X = reference_period["timestamp_seconds"].values
             y = reference_period["ds_score"].values
 
-            # Calculate statistics needed for regression
+            # Calculate regression parameters similar to SQL's regr_slope and regr_intercept
             n = len(X)
-            mean_x = X.mean()
-            mean_y = y.mean()
+            if n > 0:
+                mean_x = X.mean()
+                mean_y = y.mean()
 
-            # Calculate covariance and variance for slope calculation
-            covariance = sum((X - mean_x) * (y - mean_y))
-            variance = sum((X - mean_x) ** 2)
+                # Calculate covariance and variance (denominator)
+                covariance = sum((X - mean_x) * (y - mean_y))
+                variance = sum((X - mean_x) ** 2)
 
-            if variance != 0:
-                # Calculate slope and intercept
-                slope = covariance / variance
-                intercept = mean_y - slope * mean_x
+                if variance != 0:
+                    # Regression slope
+                    slope = covariance / variance
+                    # Regression intercept
+                    intercept = mean_y - slope * mean_x
 
-                # Calculate midpoint of current window (EXACTLY like in stored procedure)
-                current_midpoint = (now.timestamp() + five_mins_ago.timestamp()) / 2
+                    # Calculate the timestamp for the midpoint of current window (like in SQL procedure)
+                    current_midpoint = (now.timestamp() + five_mins_ago.timestamp()) / 2
 
-                # Calculate predicted value at midpoint
-                ref_predicted_avg_ds = slope * current_midpoint + intercept
+                    # Calculate predicted value at midpoint of current window
+                    ref_predicted_avg_ds = slope * current_midpoint + intercept
 
-                print(f"Regression analysis:")
-                print(f"  - Slope: {slope}")
-                print(f"  - Intercept: {intercept}")
-                print(f"  - Midpoint timestamp: {current_midpoint}")
-                print(f"  - Predicted DS score: {ref_predicted_avg_ds}")
+                    print(f"OLS regression: slope={slope}, intercept={intercept}")
+                    print(
+                        f"Midpoint timestamp: {current_midpoint}, predicted DS score: {ref_predicted_avg_ds}"
+                    )
+                else:
+                    print(
+                        "Zero variance in timestamp values, cannot perform regression"
+                    )
             else:
-                print("Zero variance in timestamp values, cannot perform regression")
+                print("No reference data points available")
         except Exception as e:
             print(f"Error in regression calculation: {e}")
 
-    # Determine if video is hot - EXACTLY like stored procedure logic
+    # Determine if video is hot
     if current_avg_ds is not None and ref_predicted_avg_ds is not None:
         is_hot = current_avg_ds > ref_predicted_avg_ds
         print(
@@ -564,46 +658,14 @@ def process_with_postgres(events_df, conn_string=conn_string):
 
             print(f"Function signature: {func_info[0]}({func_info[1]})")
 
-        # Sort events by timestamp
-        events_df_sorted = events_df.sort_values("timestamp_mnt")
+        # Process events in batches to avoid large transactions
+        batch_size = 50
+        event_batches = [
+            events_df.iloc[i : i + batch_size]
+            for i in range(0, len(events_df), batch_size)
+        ]
 
-        # Group into 5-minute batches
-        if len(events_df_sorted) > 0:
-            # Get min and max timestamps
-            min_timestamp = events_df_sorted["timestamp_mnt"].min()
-            max_timestamp = events_df_sorted["timestamp_mnt"].max()
-
-            # Generate 5-minute intervals
-            current_timestamp = min_timestamp
-            time_batches = []
-
-            while current_timestamp <= max_timestamp:
-                next_timestamp = current_timestamp + timedelta(minutes=5)
-                batch = events_df_sorted[
-                    (events_df_sorted["timestamp_mnt"] >= current_timestamp)
-                    & (events_df_sorted["timestamp_mnt"] < next_timestamp)
-                ]
-
-                if not batch.empty:
-                    time_batches.append(batch)
-
-                current_timestamp = next_timestamp
-
-            print(
-                f"Created {len(time_batches)} time-based batches (5-minute intervals)"
-            )
-        else:
-            time_batches = []
-            print("No events to process")
-
-        for batch_idx, batch_df in enumerate(time_batches):
-            batch_start_time = batch_df["timestamp_mnt"].min()
-            batch_end_time = batch_df["timestamp_mnt"].max()
-            print(
-                f"Processing batch {batch_idx+1}/{len(time_batches)} with {len(batch_df)} events "
-                f"({batch_start_time} to {batch_end_time})"
-            )
-
+        for batch_idx, batch_df in enumerate(event_batches):
             with conn.cursor() as cur:
                 # Set a long timeout for the transaction
                 cur.execute("SET statement_timeout = 300000;")  # 5 minutes
@@ -631,7 +693,7 @@ def process_with_postgres(events_df, conn_string=conn_string):
 
             # Commit after each batch
             conn.commit()
-            print(f"Committed batch {batch_idx+1}/{len(time_batches)} with PostgreSQL")
+            print(f"Processed batch {batch_idx+1}/{len(event_batches)} with PostgreSQL")
 
     # After all events are processed, run compute_hot_or_not
     with psycopg.connect(conn_string) as conn:
@@ -1245,7 +1307,7 @@ if __name__ == "__main__":
         },
     ]
 
-    # patterns = patterns + patterns2
+    patterns = patterns + patterns2
 
     run_all_activity_patterns(
         base_timestamp=run_activity_base_timestamp,
