@@ -32,6 +32,16 @@ LIKE_CTR_RANGE = 0.2
 WATCH_PERCENTAGE_CENTER = 0
 WATCH_PERCENTAGE_RANGE = 0.7
 
+# Directory structure configuration
+ROOT_DATA_DIR = "successful_run6"
+BACKFILL_DATA_DIR = os.path.join(ROOT_DATA_DIR, "activity_data_backfill")
+OUTPUT_DATA_DIR = os.path.join(ROOT_DATA_DIR, "activity_data_output")
+
+# Ensure directories exist
+os.makedirs(ROOT_DATA_DIR, exist_ok=True)
+os.makedirs(BACKFILL_DATA_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DATA_DIR, exist_ok=True)
+
 
 # %%
 def get_latest_timestamp(video_id, conn_string=conn_string):
@@ -923,6 +933,9 @@ def visualize_score_comparisons(
     if pattern_type and video_id:
         title_prefix = f"{pattern_type.capitalize()} Pattern - {video_id}\n"
 
+    # Create a unique file prefix for this video and pattern
+    file_prefix = f"{video_id}_{pattern_type}_"
+
     # ===== Create a combined figure with both plots =====
     # Create figure with 2 subplots (1 row, 2 columns)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 8))
@@ -932,21 +945,160 @@ def visualize_score_comparisons(
     sns.lineplot(
         x=postgres_data["timestamp_mnt"],
         y=postgres_data["ds_score"],
-        label="PostgreSQL DS Score",
+        label="historical_ds_score",
         color="navy",
         ax=ax1,
     )
 
-    # Plot pandas data if available
+    # Print pandas data points before plotting
     if not pandas_metrics.empty:
+        # Print the pandas data points that will be plotted in red
+        print("\n=== Pandas DS Score Data Points (Crimson Line) ===")
+        print("Number of data points:", len(pandas_metrics))
+        print("\nTimestamp and DS Score values:")
+        for idx, row in pandas_metrics.iterrows():
+            print(f"Timestamp: {row['timestamp_mnt']}, DS Score: {row['ds_score']}")
+
+        # Print any additional relevant variables
+        print("\nPandas Status Variables:")
+        for key, value in pandas_status.items():
+            print(f"{key}: {value}")
+        print("=" * 50)
+
+        # Get the time range of pandas data
+        pandas_min_time = pandas_metrics["timestamp_mnt"].min()
+        pandas_max_time = pandas_metrics["timestamp_mnt"].max()
+
+        # Filter PostgreSQL data for the same time range as pandas data
+        postgres_recent = postgres_data[
+            (postgres_data["timestamp_mnt"] >= pandas_min_time)
+            & (postgres_data["timestamp_mnt"] <= pandas_max_time)
+        ]
+
+        # Plot PostgreSQL data for the same time period as pandas blip
+        if not postgres_recent.empty:
+            sns.lineplot(
+                x=postgres_recent["timestamp_mnt"],
+                y=postgres_recent["ds_score"],
+                label="src_postgres_ds_score",
+                color="darkblue",
+                alpha=0.7,
+                linewidth=2,
+                ax=ax1,
+            )
+            print(
+                f"\nPlotted {len(postgres_recent)} PostgreSQL points for the same time range as pandas data"
+            )
+        else:
+            print(
+                "\nNo PostgreSQL data points found for the same time range as pandas data"
+            )
+
+        # Plot pandas data
         sns.lineplot(
             x=pandas_metrics["timestamp_mnt"],
             y=pandas_metrics["ds_score"],
-            label="Pandas DS Score",
+            label="sim_pandas_ds_score",
             color="crimson",
             linestyle="--",
             ax=ax1,
         )
+
+        # Plot the predicted score from linear regression if available
+        if pandas_status["reference_predicted_avg_ds_score"] is not None:
+            # Get the reference predicted score
+            pred_score = pandas_status["reference_predicted_avg_ds_score"]
+
+            # Use the actual pandas data timestamps instead of system time
+            # Get the min and max timestamps from pandas_metrics
+            if not pandas_metrics.empty:
+                # Use the actual pandas data time range
+                min_time = pandas_metrics["timestamp_mnt"].min()
+                max_time = pandas_metrics["timestamp_mnt"].max()
+
+                # Calculate midpoint based on the actual data instead of system time
+                midpoint_timestamp = min_time + (max_time - min_time) / 2
+
+                # Define a five minute window around our data
+                now = max_time
+                five_mins_ago = max(min_time, now - timedelta(minutes=5))
+
+                print("\n=== Actual Pandas Data Time Range ===")
+                print(f"Min timestamp: {min_time}")
+                print(f"Max timestamp: {max_time}")
+                print(f"Using midpoint: {midpoint_timestamp}")
+                print("=" * 50)
+
+                # Plot a specific point at the midpoint timestamp and predicted score
+                ax1.scatter(
+                    midpoint_timestamp,
+                    pred_score,
+                    color="limegreen",
+                    s=100,  # Size of marker
+                    marker="*",  # Star marker
+                    label="predicted_ds_score_regression",
+                    zorder=10,  # Make sure it's on top
+                )
+
+                # Add annotation showing exact values
+                ax1.annotate(
+                    f"Predicted: {pred_score:.2f}",
+                    xy=(midpoint_timestamp, pred_score),
+                    xytext=(10, 10),  # Offset text by 10 points
+                    textcoords="offset points",
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8),
+                    fontsize=9,
+                )
+
+                # Shade the data range where this prediction applies
+                # Add light green shading for the current window
+                ax1.axvspan(
+                    five_mins_ago,
+                    now,
+                    alpha=0.2,
+                    color="limegreen",
+                    label="current_window_data_range",
+                )
+
+                # Print the current window details
+                print("\n=== Prediction Window ===")
+                print(f"Start: {five_mins_ago}")
+                print(f"End: {now}")
+                print(f"Midpoint: {midpoint_timestamp}")
+                print(f"Predicted DS Score: {pred_score}")
+                print("=" * 50)
+            else:
+                # Fallback for empty pandas data
+                print("\nNo pandas data points to align prediction with.")
+
+                # If no pandas data, use postgres data for visualization
+                min_time = postgres_data["timestamp_mnt"].min()
+                max_time = postgres_data["timestamp_mnt"].max()
+                midpoint_timestamp = (
+                    min_time + (max_time - min_time) * 0.9
+                )  # Near the end
+
+                ax1.scatter(
+                    midpoint_timestamp,
+                    pred_score,
+                    color="limegreen",
+                    s=100,  # Size of marker
+                    marker="*",  # Star marker
+                    label="predicted_ds_score_regression",
+                    zorder=10,  # Make sure it's on top
+                )
+
+                # Add annotation
+                ax1.annotate(
+                    f"Predicted: {pred_score:.2f}",
+                    xy=(midpoint_timestamp, pred_score),
+                    xytext=(10, 10),  # Offset text by 10 points
+                    textcoords="offset points",
+                    bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8),
+                    fontsize=9,
+                )
+        else:
+            print("\nNo predicted score available from linear regression.")
 
     ax1.set_title(f"{title_prefix}DS Score Trend Comparison", fontsize=14)
     ax1.set_xlabel("Time", fontsize=12)
@@ -966,12 +1118,17 @@ def visualize_score_comparisons(
         comp_data = pd.DataFrame(
             {
                 "Metric": [
-                    "Current DS Score",
-                    "Current DS Score",
-                    "Reference DS Score",
-                    "Reference DS Score",
+                    "current_ds_score",
+                    "current_ds_score",
+                    "reference_ds_score",
+                    "reference_ds_score",
                 ],
-                "Implementation": ["Pandas", "PostgreSQL", "Pandas", "PostgreSQL"],
+                "Implementation": [
+                    "sim_pandas",
+                    "postgresql",
+                    "sim_pandas",
+                    "postgresql",
+                ],
                 "Value": [
                     pandas_status["current_avg_ds_score"],
                     postgres_status["current_avg_ds_score"],
@@ -1022,7 +1179,7 @@ def visualize_score_comparisons(
                     fontweight="bold",
                 )
 
-        ax2.set_title(f"{title_prefix}Current vs Reference DS Score", fontsize=14)
+        ax2.set_title(f"{title_prefix}current_vs_reference_ds_score", fontsize=14)
         ax2.set_ylabel("DS Score", fontsize=12)
         ax2.legend(title="Implementation", loc="upper right")
     else:
@@ -1036,15 +1193,13 @@ def visualize_score_comparisons(
             transform=ax2.transAxes,
             fontsize=14,
         )
-        ax2.set_title(f"{title_prefix}Current vs Reference DS Score", fontsize=14)
+        ax2.set_title(f"{title_prefix}current_vs_reference_ds_score", fontsize=14)
 
     # Adjust layout and save combined figure
     plt.tight_layout()
 
     if save_dir:
-        combined_file = os.path.join(
-            save_dir, f"{pattern_type}_combined_comparison.png"
-        )
+        combined_file = os.path.join(save_dir, f"{file_prefix}combined_comparison.png")
         plt.savefig(combined_file, dpi=300)
         saved_files.append(combined_file)
 
@@ -1108,7 +1263,7 @@ def run_activity_pattern(
     duration_hours=30 / 60,
     interval_minutes=4,
     events_per_interval=15,
-    base_output_dir="output",
+    base_output_dir=None,
     **pattern_kwargs,
 ):
     """
@@ -1121,7 +1276,7 @@ def run_activity_pattern(
         duration_hours (float): Duration of simulation in hours
         interval_minutes (int): Interval between data points in minutes
         events_per_interval (int): Base number of events per interval
-        base_output_dir (str): Base directory for outputs
+        base_output_dir (str): Base directory for outputs, defaults to OUTPUT_DATA_DIR
         **pattern_kwargs: Additional pattern-specific parameters
 
     Returns:
@@ -1129,16 +1284,15 @@ def run_activity_pattern(
     """
     import logging
 
-    # Create output directories
-    pattern_dir = os.path.join(base_output_dir, pattern_type)
-    log_dir = os.path.join(pattern_dir, "logs")
-    viz_dir = os.path.join(pattern_dir, "visualizations")
+    # Use the configured directory if none provided
+    if base_output_dir is None:
+        base_output_dir = OUTPUT_DATA_DIR
 
-    if not os.path.exists(viz_dir):
-        os.makedirs(viz_dir)
+    # Create output directory if it doesn't exist
+    os.makedirs(base_output_dir, exist_ok=True)
 
-    # Setup logging
-    log_file, log_handler = setup_logging(log_dir, video_id, pattern_type)
+    # Setup logging - use unique filename with pattern and video ID
+    log_file, log_handler = setup_logging(base_output_dir, video_id, pattern_type)
 
     try:
         logging.info(f"Running {pattern_type} activity pattern for video {video_id}")
@@ -1210,7 +1364,7 @@ def run_activity_pattern(
                     pandas_metrics,
                     pandas_status,
                     postgres_status,
-                    save_dir=viz_dir,
+                    save_dir=base_output_dir,
                     video_id=video_id,
                     pattern_type=pattern_type,
                 )
@@ -1229,7 +1383,7 @@ def run_activity_pattern(
             "pandas_hot": pandas_status["hot_or_not"] if pandas_status else None,
             "comparison": comparison,
             "log_file": log_file,
-            "visualization_dir": viz_dir,
+            "visualization_dir": base_output_dir,
         }
 
         logging.info(f"Activity simulation for {pattern_type} pattern complete!")
@@ -1246,13 +1400,14 @@ def run_activity_pattern(
 
 
 # %%
-def run_all_activity_patterns(base_timestamp=None, base_output_dir="output"):
+def run_all_activity_patterns(base_timestamp=None, base_output_dir=None, patterns=None):
     """
     Run all activity patterns sequentially and create a summary report.
 
     Args:
         base_timestamp (datetime): Base timestamp for all patterns, if None uses current time
-        base_output_dir (str): Base directory for outputs
+        base_output_dir (str): Base directory for outputs, defaults to OUTPUT_DATA_DIR
+        patterns (list): List of pattern configurations to run, if None uses default patterns
 
     Returns:
         list: Summary of all run results
@@ -1260,41 +1415,12 @@ def run_all_activity_patterns(base_timestamp=None, base_output_dir="output"):
     if base_timestamp is None:
         base_timestamp = datetime(2025, 4, 29, 17, 0, 0)
 
-    # Create the base output directory if it doesn't exist
-    if not os.path.exists(base_output_dir):
-        os.makedirs(base_output_dir)
+    # Use the configured directory if none provided
+    if base_output_dir is None:
+        base_output_dir = OUTPUT_DATA_DIR
 
-    # Define patterns to run with their parameters
-    patterns = [
-        {
-            "pattern_type": "increase",
-            "video_id": "sgx-test_video_increase",
-            "growth_rate": 1.05,
-        },
-        {
-            "pattern_type": "spike",
-            "video_id": "sgx-test_video_spike",
-            "spike_position": 0.5,
-            "spike_magnitude": 5.0,
-        },
-        {
-            "pattern_type": "decrease",
-            "video_id": "sgx-test_video_decrease",
-            "decay_rate": 0.9,
-            "events_per_interval": 25,
-        },
-        {
-            "pattern_type": "fluctuate",
-            "video_id": "sgx-test_video_fluctuate",
-            "fluctuation_amplitude": 0.4,
-        },
-        {
-            "pattern_type": "plateau",
-            "video_id": "sgx-test_video_plateau",
-            "growth_phase": 0.4,
-            "plateau_level": 2.5,
-        },
-    ]
+    # Create the base output directory if it doesn't exist
+    os.makedirs(base_output_dir, exist_ok=True)
 
     # Run each pattern and collect results
     results = []
@@ -1362,13 +1488,19 @@ if __name__ == "__main__":
     n_days = 1
     interval_minutes = 1
     events_per_interval = 10
-    growth_rate = 1.08  # for increase
+    growth_rate = 1.08  # for increase (exponential)
+    linear_increment = 1  # for increase (linear)
     spike_position = 0.7  # for spike
     spike_magnitude = 4.0  # for spike
     decay_rate = 0.92  # for decrease
     fluctuation_amplitude = 0.4  # for fluctuate
     growth_phase = 0.3  # for plateau
     plateau_level = 2.5  # for plateau
+
+    # Configure duration for newer activity generation
+    simulation_duration_hours = 30 / 60
+    # Run activity patterns with timestamp offset
+    run_activity_base_timestamp = base_timestamp + timedelta(minutes=1)
 
     # Clean database if needed
     clean_database_static(
@@ -1386,9 +1518,12 @@ if __name__ == "__main__":
         pattern_kwargs={
             "pattern_type": "increase",
             "growth_rate": growth_rate,
-        },  # 8% growth rate
+            "linear_increase": True,
+            "linear_increment": linear_increment,
+        },  # Use linear increase instead of exponential
+        output_dir=BACKFILL_DATA_DIR,
     )
-
+    """
     print("\n=== Generating data with SPIKE pattern ===")
     data_spike = backfill_spike.backfill_data(
         video_id="sgx-test_video_spike",
@@ -1401,6 +1536,7 @@ if __name__ == "__main__":
             "spike_position": spike_position,
             "spike_magnitude": spike_magnitude,
         },  # Spike at 70% with 4x magnitude
+        output_dir=BACKFILL_DATA_DIR,
     )
 
     print("\n=== Generating data with DECREASING pattern ===")
@@ -1414,6 +1550,7 @@ if __name__ == "__main__":
             "pattern_type": "decrease",
             "decay_rate": decay_rate,
         },  # 8% decrease per interval
+        output_dir=BACKFILL_DATA_DIR,
     )
 
     print("\n=== Generating data with PLATEAU pattern ===")
@@ -1428,6 +1565,7 @@ if __name__ == "__main__":
             "growth_phase": growth_phase,
             "plateau_level": plateau_level,
         },
+        output_dir=BACKFILL_DATA_DIR,
     )
 
     print("\n=== Generating data with FLUCTUATE pattern ===")
@@ -1441,7 +1579,10 @@ if __name__ == "__main__":
             "pattern_type": "fluctuate",
             "fluctuation_amplitude": fluctuation_amplitude,
         },
+        output_dir=BACKFILL_DATA_DIR,
     )
+    """
+
     # Check hot status for all videos
     with psycopg.connect(conn_string) as conn:
         with conn.cursor() as cur:
@@ -1465,28 +1606,53 @@ if __name__ == "__main__":
                 else:
                     print(f"\n{video_id}: No hot status found")
 
-    # Create output directory
-    # output_dir = "activity_output"
+    # Run all patterns sequentially and generate a summary report
 
-    # Option 1: Run a single pattern
-    """
-    # Example: Run just the spike pattern
-    run_activity_pattern(
-        pattern_type="spike",
-        video_id="sgx-test_video_spike",
-        start_timestamp=base_timestamp,
-        base_output_dir=output_dir,
-        spike_position=0.5,
-        spike_magnitude=5.0
-    )
-    """
+    # NOTE: Make sure you pass in right video_id for which backfill data was generated
+    patterns = [
+        {
+            "pattern_type": "increase",
+            "video_id": "sgx-test_video_increase",
+            "growth_rate": 1.05,
+            "linear_increase": True,
+            "linear_increment": 1,
+            "duration_hours": simulation_duration_hours,
+        }
+    ]
+    patterns2 = [
+        {
+            "pattern_type": "decrease",
+            "video_id": "sgx-test_video_decrease",
+            "decay_rate": 0.9,
+            "events_per_interval": 25,
+            "duration_hours": simulation_duration_hours,
+        },
+        {
+            "pattern_type": "spike",
+            "video_id": "sgx-test_video_spike",
+            "spike_position": 0.5,
+            "spike_magnitude": 5.0,
+            "duration_hours": simulation_duration_hours,
+        },
+        {
+            "pattern_type": "fluctuate",
+            "video_id": "sgx-test_video_fluctuate",
+            "fluctuation_amplitude": 0.4,
+            "duration_hours": simulation_duration_hours,
+        },
+        {
+            "pattern_type": "plateau",
+            "video_id": "sgx-test_video_plateau",
+            "growth_phase": 0.4,
+            "plateau_level": 2.5,
+            "duration_hours": simulation_duration_hours,
+        },
+    ]
 
-    output_dir = "activity_data_output"
-    run_activity_base_timestamp = base_timestamp + timedelta(minutes=1)
-    # Option 2: Run all patterns sequentially and generate a summary report
     run_all_activity_patterns(
         base_timestamp=run_activity_base_timestamp,
-        base_output_dir=output_dir,
+        base_output_dir=OUTPUT_DATA_DIR,
+        patterns=patterns,
     )
 
 # %%

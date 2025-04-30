@@ -84,14 +84,18 @@ class ActivityGenerator:
         events_per_interval,
         growth_rate=1.05,
         max_events_per_interval=1000,
+        linear_increase=True,
+        linear_increment=2,
         **kwargs,
     ):
         """
         Generate steadily increasing activity data.
 
         Args:
-            growth_rate (float): Rate of growth per interval (default 1.05 = 5% growth)
+            growth_rate (float): Rate of growth per interval if using exponential growth (default 1.05 = 5% growth)
             max_events_per_interval (int): Maximum number of events per interval to prevent excessive growth
+            linear_increase (bool): Whether to use linear increase instead of exponential growth
+            linear_increment (int): Number of events to add per interval when using linear increase
         """
         # Create time intervals
         end_timestamp = start_timestamp + timedelta(hours=duration_hours)
@@ -122,9 +126,15 @@ class ActivityGenerator:
             total=len(intervals),
             desc="Generating activity",
         ):
-            # Calculate the number of events for this interval (growing over time)
-            num_events = min(int(current_events), max_events_per_interval)
-            current_events *= growth_rate
+            # Calculate the number of events for this interval
+            if linear_increase:
+                # Linear increase: Add a fixed number of events each interval
+                current_events = events_per_interval + (i * linear_increment)
+                num_events = min(int(current_events), max_events_per_interval)
+            else:
+                # Original exponential growth
+                num_events = min(int(current_events), max_events_per_interval)
+                current_events *= growth_rate
 
             # Add events with increasing watch time and like probability
             self._add_events(data, video_id, timestamp, num_events, i, len(intervals))
@@ -384,14 +394,28 @@ class ActivityGenerator:
                 # Growth phase (with cap)
                 num_events = min(int(current_events), max_events_per_interval)
                 current_events *= growth_rate
+                # Flag to indicate we're in growth phase
+                is_plateau_phase = False
             else:
                 # Plateau phase (with cap)
                 num_events = min(
                     int(events_per_interval * plateau_level), max_events_per_interval
                 )
+                # Flag to indicate we're in plateau phase
+                is_plateau_phase = True
 
-            # Add events
-            self._add_events(data, video_id, timestamp, num_events, i, num_intervals)
+            # Add events - pass the plateau information
+            self._add_events(
+                data,
+                video_id,
+                timestamp,
+                num_events,
+                i,
+                num_intervals,
+                is_plateau_phase=is_plateau_phase,
+                growth_end=growth_end,
+                plateau_level=plateau_level,
+            )
 
         return pd.DataFrame(data)
 
@@ -404,6 +428,9 @@ class ActivityGenerator:
         interval_index,
         total_intervals,
         decreasing=False,
+        is_plateau_phase=False,
+        growth_end=None,
+        plateau_level=None,
     ):
         """
         Helper method to add events to the data list.
@@ -416,6 +443,9 @@ class ActivityGenerator:
             interval_index (int): Current interval index
             total_intervals (int): Total number of intervals
             decreasing (bool): Whether metrics should decrease over time
+            is_plateau_phase (bool): Whether we're in the plateau phase for plateau pattern
+            growth_end (int): Index when growth phase ends for plateau pattern
+            plateau_level (float): Level at which metrics should plateau
         """
         # Calculate progress through the time series (0 to 1)
         progress = interval_index / total_intervals
@@ -423,6 +453,15 @@ class ActivityGenerator:
         # For decreasing pattern, invert the progress
         if decreasing:
             quality_factor = 1 - progress
+        elif (
+            self.pattern_type == "plateau"
+            and is_plateau_phase
+            and growth_end is not None
+        ):
+            # For plateau pattern in plateau phase, use a constant quality factor
+            # equal to the progress at the growth_end point
+            plateau_progress = growth_end / total_intervals
+            quality_factor = plateau_progress
         else:
             quality_factor = progress
 
@@ -430,12 +469,19 @@ class ActivityGenerator:
         base_like_probability = 0.1 + quality_factor * 0.2
         like_probability = min(0.5, base_like_probability)
 
-        base_watch_pct = 40 + quality_factor * 30
+        # For increase pattern, make the watch percentage increase more steadily
+        if self.pattern_type == "increase":
+            # More steady increase with smaller variation
+            base_watch_pct = 40 + quality_factor * 30
+            random_variation = 5  # Smaller variation for steadier trend
+        else:
+            base_watch_pct = 40 + quality_factor * 30
+            random_variation = 10  # Original variation
 
         # Add the specified number of events
         for _ in range(num_events):
             # Add some randomness to watch percentage
-            watch_pct = min(95, base_watch_pct + np.random.normal(0, 10))
+            watch_pct = min(95, base_watch_pct + np.random.normal(0, random_variation))
             watch_pct = max(10, watch_pct)
 
             # Determine if this event resulted in a like
@@ -812,6 +858,7 @@ class BackFill:
         interval_minutes=5,
         events_per_interval=10,
         pattern_kwargs=None,
+        output_dir=None,
     ):
         """
         Generate activity data and populate the database in one step.
@@ -821,6 +868,7 @@ class BackFill:
             end_time (datetime): The end timestamp for the data generation.
             period (timedelta): The time period to generate data for, default is 1 day.
             pattern_kwargs (dict): Additional keyword arguments for the pattern generator.
+            output_dir (str): Directory to save visualization outputs, defaults to "activity_data/activity_data_backfill"
         """
         data = self.generate_activity_data(
             video_id=video_id,
@@ -842,18 +890,49 @@ class BackFill:
             }
         )
 
-        os.makedirs("activity_data_backfill", exist_ok=True)
+        # Set default output directory if none provided
+        if output_dir is None:
+            # Create default directory structure
+            root_dir = "activity_data"
+            output_dir = os.path.join(root_dir, "activity_data_backfill")
+
+        # Ensure output directory exists
+        os.makedirs(output_dir, exist_ok=True)
+
         sns.set(style="whitegrid")  # Use seaborn's whitegrid style
-        plt.figure(figsize=(12, 6))  # Adjust figure size for better readability
-        sns.lineplot(x="timestamp_mnt", y="average_percentage_watched_mnt", data=data)
-        plt.xlabel("Timestamp")
-        plt.ylabel("Average Percentage Watched")
+
+        # Create a figure with two y-axes
+        fig, ax1 = plt.subplots(figsize=(12, 6))
+
+        # Plot average percentage watched on the first axis
+        color = "tab:blue"
+        ax1.set_xlabel("Timestamp")
+        ax1.set_ylabel("Average Percentage Watched", color=color)
+        ax1.plot(
+            data["timestamp_mnt"], data["average_percentage_watched_mnt"], color=color
+        )
+        ax1.tick_params(axis="y", labelcolor=color)
+
+        # Create a second y-axis for watch count
+        ax2 = ax1.twinx()
+        color = "tab:red"
+        ax2.set_ylabel("Watch Count", color=color)
+        ax2.plot(data["timestamp_mnt"], data["watch_count_mnt"], color=color)
+        ax2.tick_params(axis="y", labelcolor=color)
+
         plt.title(f"Activity Data for {video_id} ({pattern_kwargs['pattern_type']})")
         plt.xticks(rotation=45, ha="right")  # Rotate timestamps for visibility
+
+        # Add legend
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, ["Avg % Watched", "Watch Count"], loc="upper right")
+
         plt.tight_layout()  # Adjust layout to prevent labels from overlapping
-        plt.savefig(
-            f"activity_data_backfill/activity_data_{video_id}_{pattern_kwargs['pattern_type']}.png"
-        )
+
+        # Use a more concise filename that's still unique
+        output_filename = f"{video_id}_{pattern_kwargs['pattern_type']}_activity.png"
+        plt.savefig(os.path.join(output_dir, output_filename))
         plt.close()  # Close the plot to free memory
 
         print("#" * 100)
