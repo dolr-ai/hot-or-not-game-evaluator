@@ -12,6 +12,13 @@ import matplotlib.pyplot as plt
 from sqlalchemy import create_engine
 import seaborn as sns
 
+from one_day_history import (
+    generate_data_to_populate_database,
+    clean_database_post_data_population,
+)
+
+from activity_generator import ActivityGenerator
+
 # Load environment variables
 load_dotenv("/Users/sagar/work/yral/hot-or-not-game-evaluator/test/.env")
 
@@ -81,9 +88,11 @@ def generate_activity_data(
     interval_minutes=4,
     events_per_interval=10,
     growth_rate=1.05,  # 5% growth per interval
+    pattern_type="steady-increase",  # Default to steady-increase for backward compatibility
+    **kwargs,
 ):
     """
-    Generate steadily increasing activity data for a video.
+    Generate activity data for a video using the ActivityGenerator class.
 
     Args:
         video_id (str): The ID of the video
@@ -92,6 +101,8 @@ def generate_activity_data(
         interval_minutes (int): Interval between data points in minutes
         events_per_interval (int): Base number of events per interval
         growth_rate (float): Growth rate of events per interval
+        pattern_type (str): Type of activity pattern to generate
+        **kwargs: Additional pattern-specific parameters
 
     Returns:
         pandas.DataFrame: DataFrame with activity data
@@ -101,69 +112,17 @@ def generate_activity_data(
 
     print(f"Generating activity data from: {start_timestamp}")
 
-    # Check if start_timestamp is timezone-aware
-    is_tz_aware = (
-        hasattr(start_timestamp, "tzinfo") and start_timestamp.tzinfo is not None
+    # Use ActivityGenerator for all patterns, with steady-increase as the default
+    generator = ActivityGenerator(pattern_type=pattern_type)
+    return generator.generate_data(
+        video_id=video_id,
+        start_timestamp=start_timestamp,
+        duration_hours=duration_hours,
+        interval_minutes=interval_minutes,
+        events_per_interval=events_per_interval,
+        growth_rate=growth_rate,
+        **kwargs,
     )
-
-    # Create time intervals
-    end_timestamp = start_timestamp + timedelta(hours=duration_hours)
-
-    # Create date_range with appropriate timezone awareness
-    if is_tz_aware:
-        # If timezone-aware, create timezone-aware intervals
-        intervals = pd.date_range(
-            start=start_timestamp + timedelta(minutes=interval_minutes),
-            end=end_timestamp,
-            freq=f"{interval_minutes}min",
-            tz=start_timestamp.tzinfo,
-        )
-    else:
-        # If timezone-naive, create timezone-naive intervals
-        intervals = pd.date_range(
-            start=start_timestamp + timedelta(minutes=interval_minutes),
-            end=end_timestamp,
-            freq=f"{interval_minutes}min",
-        )
-
-    data = []
-    current_events = events_per_interval
-
-    # Generate data with steadily increasing activity
-    for i, timestamp in enumerate(intervals):
-        # Calculate the number of events for this interval (growing over time)
-        num_events = int(current_events)
-        current_events *= growth_rate
-
-        # For each event, generate watch and like data
-        for event in range(num_events):
-            # Increasing likelihood of likes over time to show improvement
-            base_like_probability = 0.1 + (i / len(intervals)) * 0.2
-            like_probability = min(0.5, base_like_probability)
-
-            # Generate better watch percentages over time
-            base_watch_pct = 40 + (i / len(intervals)) * 30
-            watch_pct = min(95, base_watch_pct + np.random.normal(0, 10))
-
-            # Add some randomness to watch percentage
-            watch_pct = max(10, min(100, watch_pct))
-
-            # Determine if this event resulted in a like
-            liked = np.random.random() < like_probability
-
-            # Add event to data
-            data.append(
-                {
-                    "video_id": video_id,
-                    "timestamp_mnt": timestamp,
-                    "liked": liked,
-                    "watch_percentage": watch_pct,
-                }
-            )
-
-    # Convert to DataFrame
-    df = pd.DataFrame(data)
-    return df
 
 
 # %%
@@ -693,7 +652,7 @@ def process_with_postgres(events_df, conn_string=conn_string):
             print(f"Function signature: {func_info[0]}({func_info[1]})")
 
         # Process events in batches to avoid large transactions
-        batch_size = 100
+        batch_size = 50
         event_batches = [
             events_df.iloc[i : i + batch_size]
             for i in range(0, len(events_df), batch_size)
@@ -900,12 +859,199 @@ def retrieve_data_for_comparison(
 
 # %%
 def visualize_score_comparisons(
-    postgres_data, pandas_metrics, pandas_status, postgres_status, save_path=""
+    postgres_data,
+    pandas_metrics,
+    pandas_status,
+    postgres_status,
+    save_dir=None,
+    video_id=None,
+    pattern_type=None,
 ):
+    """
+    Create visualizations comparing PostgreSQL and pandas data and save to files.
+
+    Args:
+        postgres_data (pandas.DataFrame): Data from PostgreSQL
+        pandas_metrics (pandas.DataFrame): Metrics calculated with pandas
+        pandas_status (dict): Hot or not status from pandas processing
+        postgres_status (dict): Hot or not status from PostgreSQL processing
+        save_dir (str): Directory to save visualizations, if None, only displays them
+        video_id (str): The ID of the video for title information
+        pattern_type (str): Type of activity pattern for title information
+
+    Returns:
+        list: Paths to saved figure files if save_dir is provided
+    """
+    import logging
+
+    # Create save directory if it doesn't exist
+    saved_files = []
+    if save_dir and not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
     # Set seaborn style
     sns.set_style("whitegrid")
 
-    # Plot 1: DS scores over time
+    # Log debug information about why reference_ds_score might be None
+    logging.info(f"Debug reference_ds_score calculation:")
+    if pandas_status["reference_predicted_avg_ds_score"] is None:
+        logging.info("  Pandas reference_ds_score is None")
+        # Check reference period data
+        one_day_ago = pandas_metrics["timestamp_mnt"].min() - timedelta(days=1)
+        five_mins_ago = pandas_metrics["timestamp_mnt"].max() - timedelta(minutes=5)
+        reference_period_data = postgres_data[
+            (postgres_data["timestamp_mnt"] >= one_day_ago)
+            & (postgres_data["timestamp_mnt"] < five_mins_ago)
+        ]
+        logging.info(f"  Reference period has {len(reference_period_data)} rows")
+        if len(reference_period_data) < 2:
+            logging.info(
+                "  Not enough data points in reference period for regression (need at least 2)"
+            )
+        else:
+            logging.info("  Enough data points but regression may have failed")
+    else:
+        logging.info(
+            f"  Pandas reference_ds_score = {pandas_status['reference_predicted_avg_ds_score']}"
+        )
+
+    if postgres_status["reference_predicted_avg_ds_score"] is None:
+        logging.info("  PostgreSQL reference_ds_score is None")
+    else:
+        logging.info(
+            f"  PostgreSQL reference_ds_score = {postgres_status['reference_predicted_avg_ds_score']}"
+        )
+
+    # Create a title with pattern and video information if provided
+    title_prefix = ""
+    if pattern_type and video_id:
+        title_prefix = f"{pattern_type.capitalize()} Pattern - {video_id}\n"
+
+    # ===== Create a combined figure with both plots =====
+    # Create figure with 2 subplots (1 row, 2 columns)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 8))
+
+    # --- Left subplot: DS scores over time trend line ---
+    # Plot PostgreSQL data
+    sns.lineplot(
+        x=postgres_data["timestamp_mnt"],
+        y=postgres_data["ds_score"],
+        label="PostgreSQL DS Score",
+        color="navy",
+        ax=ax1,
+    )
+
+    # Plot pandas data if available
+    if not pandas_metrics.empty:
+        sns.lineplot(
+            x=pandas_metrics["timestamp_mnt"],
+            y=pandas_metrics["ds_score"],
+            label="Pandas DS Score",
+            color="crimson",
+            linestyle="--",
+            ax=ax1,
+        )
+
+    ax1.set_title(f"{title_prefix}DS Score Trend Comparison", fontsize=14)
+    ax1.set_xlabel("Time", fontsize=12)
+    ax1.set_ylabel("DS Score", fontsize=12)
+    ax1.legend(loc="best")
+
+    # Rotate x-axis labels for better readability
+    plt.setp(ax1.get_xticklabels(), rotation=45, ha="right")
+
+    # --- Right subplot: Bar comparison for current and reference scores ---
+    # Check if we have data for bar chart
+    if (
+        pandas_status["current_avg_ds_score"] is not None
+        and postgres_status["current_avg_ds_score"] is not None
+    ):
+        # Create DataFrame for better seaborn integration
+        comp_data = pd.DataFrame(
+            {
+                "Metric": [
+                    "Current DS Score",
+                    "Current DS Score",
+                    "Reference DS Score",
+                    "Reference DS Score",
+                ],
+                "Implementation": ["Pandas", "PostgreSQL", "Pandas", "PostgreSQL"],
+                "Value": [
+                    pandas_status["current_avg_ds_score"],
+                    postgres_status["current_avg_ds_score"],
+                    (
+                        pandas_status["reference_predicted_avg_ds_score"]
+                        if pandas_status["reference_predicted_avg_ds_score"] is not None
+                        else 0
+                    ),
+                    (
+                        postgres_status["reference_predicted_avg_ds_score"]
+                        if postgres_status["reference_predicted_avg_ds_score"]
+                        is not None
+                        else 0
+                    ),
+                ],
+            }
+        )
+
+        # Create grouped bar chart
+        bar_plot = sns.barplot(
+            x="Metric",
+            y="Value",
+            hue="Implementation",
+            data=comp_data,
+            palette=["crimson", "navy"],
+            ax=ax2,
+        )
+
+        # Add values on top of the bars
+        for bar in bar_plot.containers:
+            bar_plot.bar_label(bar, fmt="%.2f")
+
+        # Annotate None values
+        for i, val in enumerate(comp_data["Value"]):
+            if i >= 2 and (  # Only for reference DS scores
+                (i == 2 and pandas_status["reference_predicted_avg_ds_score"] is None)
+                or (
+                    i == 3
+                    and postgres_status["reference_predicted_avg_ds_score"] is None
+                )
+            ):
+                bar_plot.annotate(
+                    "None",
+                    xy=(i % 2, 0.1),  # Position at the bottom of the bar
+                    ha="center",
+                    va="bottom",
+                    color="red",
+                    fontweight="bold",
+                )
+
+        ax2.set_title(f"{title_prefix}Current vs Reference DS Score", fontsize=14)
+        ax2.set_ylabel("DS Score", fontsize=12)
+        ax2.legend(title="Implementation", loc="upper right")
+    else:
+        # If no data for bar chart, display a message
+        ax2.text(
+            0.5,
+            0.5,
+            "No current DS score data available",
+            horizontalalignment="center",
+            verticalalignment="center",
+            transform=ax2.transAxes,
+            fontsize=14,
+        )
+        ax2.set_title(f"{title_prefix}Current vs Reference DS Score", fontsize=14)
+
+    # Adjust layout and save combined figure
+    plt.tight_layout()
+
+    if save_dir:
+        combined_file = os.path.join(save_dir, "combined_comparison.png")
+        plt.savefig(combined_file, dpi=300)
+        saved_files.append(combined_file)
+
+    # Also create individual plots for backward compatibility
+    # DS scores over time (reusing the same code as before)
     plt.figure(figsize=(12, 6))
 
     # Plot PostgreSQL data
@@ -926,21 +1072,25 @@ def visualize_score_comparisons(
             linestyle="--",
         )
 
-    plt.title("DS Score Comparison", fontsize=14)
+    plt.title(f"{title_prefix}DS Score Trend Comparison", fontsize=14)
     plt.xlabel("Time", fontsize=12)
     plt.ylabel("DS Score", fontsize=12)
     plt.legend()
     plt.tight_layout()
 
-    # Plot 2: Bar comparison if we have current and reference scores
+    if save_dir:
+        ds_score_file = os.path.join(save_dir, "ds_score_comparison.png")
+        plt.savefig(ds_score_file, dpi=300)
+        saved_files.append(ds_score_file)
+
+    # Bar comparison if we have current and reference scores
     if (
         pandas_status["current_avg_ds_score"] is not None
         and postgres_status["current_avg_ds_score"] is not None
     ):
+        plt.figure(figsize=(10, 6))
 
-        # Create DataFrame for better seaborn integration
-        import pandas as pd
-
+        # Reuse the same comp_data as above
         comp_data = pd.DataFrame(
             {
                 "Metric": [
@@ -953,12 +1103,20 @@ def visualize_score_comparisons(
                 "Value": [
                     pandas_status["current_avg_ds_score"],
                     postgres_status["current_avg_ds_score"],
-                    pandas_status["reference_predicted_avg_ds_score"],
-                    postgres_status["reference_predicted_avg_ds_score"],
+                    (
+                        pandas_status["reference_predicted_avg_ds_score"]
+                        if pandas_status["reference_predicted_avg_ds_score"] is not None
+                        else 0
+                    ),
+                    (
+                        postgres_status["reference_predicted_avg_ds_score"]
+                        if postgres_status["reference_predicted_avg_ds_score"]
+                        is not None
+                        else 0
+                    ),
                 ],
             }
         )
-        plt.figure(figsize=(10, 6))
 
         # Create grouped bar chart
         ax = sns.barplot(
@@ -973,131 +1131,357 @@ def visualize_score_comparisons(
         for bar in ax.containers:
             ax.bar_label(bar, fmt="%.2f")
 
-        plt.title("Current vs Reference DS Score Comparison", fontsize=14)
+        plt.title(f"{title_prefix}Current vs Reference DS Score", fontsize=14)
         plt.ylabel("DS Score", fontsize=12)
         plt.legend(title="Implementation", bbox_to_anchor=(1.05, 1), loc="upper left")
         plt.tight_layout()
 
-    return
+        if save_dir:
+            bar_comp_file = os.path.join(save_dir, "score_bar_comparison.png")
+            plt.savefig(bar_comp_file, dpi=300)
+            saved_files.append(bar_comp_file)
+
+    return saved_files if save_dir else None
 
 
 # %%
-def main(
-    video_id="sgx-test_video_simple",
-    start_timestamp=None,  # Default to None to use the defined default or database timestamp
-    duration_hours=1,
-    interval_minutes=4,
-    events_per_interval=10,
-    growth_rate=1.05,
-):
+def setup_logging(log_dir, video_id, pattern_type):
     """
-    Main function to run the activity simulation.
+    Set up logging for activity runs.
 
     Args:
+        log_dir (str): Directory to save logs
         video_id (str): The ID of the video
-        start_timestamp (datetime): Starting timestamp for the activity data
-        duration_hours (int): Duration of simulation in hours
-        interval_minutes (int): Interval between data points in minutes
-        events_per_interval (int): Base number of events per interval
-        growth_rate (float): Growth rate of events per interval
+        pattern_type (str): Type of activity pattern
 
     Returns:
-        None
+        tuple: (log_file_path, log_file_handler)
     """
-    # Use default timestamp if none provided
+    import logging
 
-    print(f"Starting activity simulation for video {video_id} from {start_timestamp}")
+    # Create log directory if it doesn't exist
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
 
-    # 1. Get the latest timestamp from the database (if needed)
-    if start_timestamp is None:
-        start_timestamp = get_latest_timestamp(video_id)
+    # Create a unique log filename based on video_id and pattern_type
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f"{video_id}_{pattern_type}_{timestamp}.log")
 
-    print(f"Using timestamp: {start_timestamp}")
+    # Configure logging
+    log_handler = logging.FileHandler(log_file)
+    log_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    log_handler.setFormatter(log_formatter)
 
-    # 2. Generate activity data
-    events_df = generate_activity_data(
-        video_id=video_id,
-        start_timestamp=start_timestamp,
-        duration_hours=duration_hours,
-        interval_minutes=interval_minutes,
-        events_per_interval=events_per_interval,
-        growth_rate=growth_rate,
-    )
-    print(
-        f"Generated {len(events_df)} events across {events_df['timestamp_mnt'].nunique()} time intervals"
-    )
+    # Get the root logger and configure it
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
 
-    # Print the min and max timestamps
-    print(
-        f"Time range: {events_df['timestamp_mnt'].min()} to {events_df['timestamp_mnt'].max()}"
-    )
+    # Remove existing handlers to avoid duplicate logs
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
 
-    # 3. Process with PostgreSQL first
-    print("Processing with PostgreSQL...")
-    postgres_status = process_with_postgres(events_df)
-    print("PostgreSQL processing complete")
-    if postgres_status:
-        print(
-            f"PostgreSQL hot status: {'Hot' if postgres_status['hot_or_not'] else 'Not Hot'}"
+    # Add the new handler
+    logger.addHandler(log_handler)
+
+    # Also log to console
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(log_formatter)
+    logger.addHandler(console_handler)
+
+    logging.info(f"Starting logging for video {video_id} with pattern {pattern_type}")
+
+    return log_file, log_handler
+
+
+# %%
+def run_activity_pattern(
+    pattern_type,
+    video_id,
+    start_timestamp,
+    duration_hours=30 / 60,
+    interval_minutes=4,
+    events_per_interval=15,
+    base_output_dir="output",
+    **pattern_kwargs,
+):
+    """
+    Run a single activity pattern, process the data, and save logs and visualizations.
+
+    Args:
+        pattern_type (str): Type of activity pattern to generate
+        video_id (str): The ID of the video
+        start_timestamp (datetime): Starting timestamp for the activity data
+        duration_hours (float): Duration of simulation in hours
+        interval_minutes (int): Interval between data points in minutes
+        events_per_interval (int): Base number of events per interval
+        base_output_dir (str): Base directory for outputs
+        **pattern_kwargs: Additional pattern-specific parameters
+
+    Returns:
+        dict: Summary of the run results
+    """
+    import logging
+
+    # Create output directories
+    pattern_dir = os.path.join(base_output_dir, pattern_type)
+    log_dir = os.path.join(pattern_dir, "logs")
+    viz_dir = os.path.join(pattern_dir, "visualizations")
+
+    if not os.path.exists(viz_dir):
+        os.makedirs(viz_dir)
+
+    # Setup logging
+    log_file, log_handler = setup_logging(log_dir, video_id, pattern_type)
+
+    try:
+        logging.info(f"Running {pattern_type} activity pattern for video {video_id}")
+        logging.info(f"Start timestamp: {start_timestamp}")
+        logging.info(
+            f"Parameters: duration={duration_hours}h, interval={interval_minutes}min, events_per_interval={events_per_interval}"
         )
-    else:
-        print("Failed to get PostgreSQL status")
+        logging.info(f"Additional parameters: {pattern_kwargs}")
 
-    # 4. Retrieve data from PostgreSQL for comparison
-    start_timestamp_for_query = start_timestamp - timedelta(
-        days=1
-    )  # Include historical data
-    end_timestamp = events_df["timestamp_mnt"].max()
-    postgres_data = retrieve_data_for_comparison(
-        video_id, start_timestamp_for_query, end_timestamp
-    )
-    print(f"Retrieved {len(postgres_data)} rows from PostgreSQL for comparison")
+        # Generate activity data
+        events_df = generate_activity_data(
+            video_id=video_id,
+            start_timestamp=start_timestamp,
+            duration_hours=duration_hours,
+            interval_minutes=interval_minutes,
+            events_per_interval=events_per_interval,
+            pattern_type=pattern_type,
+            **pattern_kwargs,
+        )
 
-    # 5. Process with pandas using the events data
-    print("Processing with pandas...")
-    pandas_metrics, pandas_status = process_with_pandas(events_df)
-    print("Pandas processing complete")
-    print(f"Pandas hot status: {'Hot' if pandas_status['hot_or_not'] else 'Not Hot'}")
+        logging.info(
+            f"Generated {len(events_df)} events across {events_df['timestamp_mnt'].nunique()} time intervals"
+        )
+        logging.info(
+            f"Time range: {events_df['timestamp_mnt'].min()} to {events_df['timestamp_mnt'].max()}"
+        )
 
-    # 6. Compare results
-    if postgres_status:
-        comparison = compare_results(pandas_metrics, pandas_status, postgres_status)
-        print("\nComparison Results:")
-        for key, value in comparison.items():
-            print(f"{key}: {value}")
-
-        # 7. Visualize data if enough data points
-        if len(postgres_data) >= 2:
-            visualize_score_comparisons(
-                postgres_data, pandas_metrics, pandas_status, postgres_status
+        # Process with PostgreSQL
+        logging.info("Processing with PostgreSQL...")
+        postgres_status = process_with_postgres(events_df)
+        if postgres_status:
+            logging.info(
+                f"PostgreSQL hot status: {'Hot' if postgres_status['hot_or_not'] else 'Not Hot'}"
             )
-    else:
-        print("Cannot compare results: PostgreSQL processing failed")
+        else:
+            logging.error("Failed to get PostgreSQL status")
 
-    print("Activity simulation complete!")
+        # Retrieve data from PostgreSQL for comparison
+        start_timestamp_for_query = start_timestamp - timedelta(
+            days=1
+        )  # Include historical data
+        end_timestamp = events_df["timestamp_mnt"].max()
+        postgres_data = retrieve_data_for_comparison(
+            video_id, start_timestamp_for_query, end_timestamp
+        )
+        logging.info(
+            f"Retrieved {len(postgres_data)} rows from PostgreSQL for comparison"
+        )
+
+        # Process with pandas
+        logging.info("Processing with pandas...")
+        pandas_metrics, pandas_status = process_with_pandas(events_df)
+        logging.info(
+            f"Pandas hot status: {'Hot' if pandas_status['hot_or_not'] else 'Not Hot'}"
+        )
+
+        # Compare results
+        comparison = None
+        if postgres_status:
+            comparison = compare_results(pandas_metrics, pandas_status, postgres_status)
+            logging.info("\nComparison Results:")
+            for key, value in comparison.items():
+                logging.info(f"{key}: {value}")
+
+            # Create visualizations if enough data points
+            if len(postgres_data) >= 2:
+                saved_files = visualize_score_comparisons(
+                    postgres_data,
+                    pandas_metrics,
+                    pandas_status,
+                    postgres_status,
+                    save_dir=viz_dir,
+                    video_id=video_id,
+                    pattern_type=pattern_type,
+                )
+                if saved_files:
+                    logging.info(f"Saved visualizations to: {', '.join(saved_files)}")
+        else:
+            logging.error("Cannot compare results: PostgreSQL processing failed")
+
+        # Create a summary of the run
+        summary = {
+            "pattern_type": pattern_type,
+            "video_id": video_id,
+            "event_count": len(events_df),
+            "time_intervals": events_df["timestamp_mnt"].nunique(),
+            "postgres_hot": postgres_status["hot_or_not"] if postgres_status else None,
+            "pandas_hot": pandas_status["hot_or_not"] if pandas_status else None,
+            "comparison": comparison,
+            "log_file": log_file,
+            "visualization_dir": viz_dir,
+        }
+
+        logging.info(f"Activity simulation for {pattern_type} pattern complete!")
+        return summary
+
+    except Exception as e:
+        logging.exception(f"Error running {pattern_type} activity pattern: {str(e)}")
+        return {"error": str(e), "pattern_type": pattern_type, "video_id": video_id}
+
+    finally:
+        # Clean up logging
+        logging.getLogger().removeHandler(log_handler)
+        log_handler.close()
+
+
+# %%
+def run_all_activity_patterns(base_timestamp=None, base_output_dir="output"):
+    """
+    Run all activity patterns sequentially and create a summary report.
+
+    Args:
+        base_timestamp (datetime): Base timestamp for all patterns, if None uses current time
+        base_output_dir (str): Base directory for outputs
+
+    Returns:
+        list: Summary of all run results
+    """
+    if base_timestamp is None:
+        base_timestamp = datetime(2025, 4, 29, 17, 0, 0)
+
+    # Create the base output directory if it doesn't exist
+    if not os.path.exists(base_output_dir):
+        os.makedirs(base_output_dir)
+
+    # Define patterns to run with their parameters
+    patterns = [
+        {
+            "pattern_type": "steady-increase",
+            "video_id": "sgx-test_video_simple",
+            "growth_rate": 1.05,
+        },
+        {
+            "pattern_type": "spike",
+            "video_id": "sgx-test_video_spike",
+            "spike_position": 0.5,
+            "spike_magnitude": 5.0,
+        },
+        {
+            "pattern_type": "decrease",
+            "video_id": "sgx-test_video_decrease",
+            "decay_rate": 0.9,
+            "events_per_interval": 25,
+        },
+        {
+            "pattern_type": "fluctuate",
+            "video_id": "sgx-test_video_fluctuate",
+            "fluctuation_amplitude": 0.4,
+        },
+        {
+            "pattern_type": "plateau",
+            "video_id": "sgx-test_video_plateau",
+            "growth_phase": 0.4,
+            "plateau_level": 2.5,
+        },
+    ]
+
+    # Run each pattern and collect results
+    results = []
+    for i, pattern_config in enumerate(patterns):
+        print(
+            f"\n{'='*80}\nRunning pattern {i+1}/{len(patterns)}: {pattern_config['pattern_type']}\n{'='*80}\n"
+        )
+
+        pattern_type = pattern_config.pop("pattern_type")
+        video_id = pattern_config.pop("video_id")
+
+        # Use a different timestamp for each pattern to avoid conflicts
+        pattern_timestamp = base_timestamp + timedelta(hours=i)
+
+        # Run the pattern and get results
+        result = run_activity_pattern(
+            pattern_type=pattern_type,
+            video_id=video_id,
+            start_timestamp=pattern_timestamp,
+            base_output_dir=base_output_dir,
+            **pattern_config,
+        )
+
+        results.append(result)
+
+        # Wait a bit between runs to ensure database operations complete
+        time.sleep(5)
+
+    # Create a summary report
+    summary_file = os.path.join(base_output_dir, "activity_patterns_summary.txt")
+    with open(summary_file, "w") as f:
+        f.write("Activity Patterns Summary Report\n")
+        f.write("===============================\n\n")
+        f.write(f"Generated on: {datetime.now()}\n\n")
+
+        for i, result in enumerate(results):
+            f.write(f"Pattern {i+1}: {result['pattern_type']}\n")
+            f.write(f"  Video ID: {result['video_id']}\n")
+            if "error" in result:
+                f.write(f"  ERROR: {result['error']}\n")
+            else:
+                f.write(f"  Events: {result['event_count']}\n")
+                f.write(f"  Time intervals: {result['time_intervals']}\n")
+                f.write(f"  PostgreSQL hot status: {result['postgres_hot']}\n")
+                f.write(f"  Pandas hot status: {result['pandas_hot']}\n")
+                f.write(f"  Log file: {result['log_file']}\n")
+                f.write(f"  Visualization directory: {result['visualization_dir']}\n")
+            f.write("\n")
+
+    print(f"Summary report generated at: {summary_file}")
+    return results
 
 
 # %%
 if __name__ == "__main__":
-    from one_day_history import (
-        generate_data_to_populate_database,
-        clean_database_post_data_population,
+    # Use default timestamp if none provided
+    base_timestamp = datetime(2025, 4, 29, 20, 30, 0)
+
+    # Clean database if needed
+    clean_database_post_data_population(
+        test_video_id_prefix="sgx-",
+        end_time=base_timestamp,
     )
 
-    if True:
-        clean_database_post_data_population(
-            test_video_id_prefix="sgx-",
-            end_time=datetime(2025, 4, 29, 16, 30, 0),
+    for i in [
+        "sgx-test_video_increase",
+        "sgx-test_video_spike",
+        "sgx-test_video_decrease",
+        "sgx-test_video_fluctuate",
+        "sgx-test_video_plateau",
+    ]:
+        generate_data_to_populate_database(
+            end_time=base_timestamp,
+            period=timedelta(days=1),
+            video_id=i,
         )
-        generate_data_to_populate_database()
 
-    main(
-        video_id="sgx-test_video_simple",
-        start_timestamp=datetime(2025, 4, 29, 17, 00, 0),
-        duration_hours=30 / 60,  # Just 25 minutes for testing
-        interval_minutes=4,  # Generate data every 4 minutes
-        events_per_interval=15,  # Start with 10 events per interval
-        growth_rate=1.05,  # 5% growth rate per interval
+    # Create output directory
+    output_dir = "activity_output"
+
+    # Option 1: Run a single pattern
+    """
+    # Example: Run just the spike pattern
+    run_activity_pattern(
+        pattern_type="spike",
+        video_id="sgx-test_video_spike",
+        start_timestamp=base_timestamp,
+        base_output_dir=output_dir,
+        spike_position=0.5,
+        spike_magnitude=5.0
     )
+    """
+
+    # Option 2: Run all patterns sequentially and generate a summary report
+    run_all_activity_patterns(base_timestamp=base_timestamp, base_output_dir=output_dir)
 
 # %%
