@@ -12,12 +12,8 @@ import matplotlib.pyplot as plt
 from sqlalchemy import create_engine
 import seaborn as sns
 
-from one_day_history import (
-    generate_data_to_populate_database,
-    clean_database_post_data_population,
-)
 
-from activity_generator import ActivityGenerator
+from activity_generator import ActivityGenerator, BackFill, clean_database_static
 
 # Load environment variables
 load_dotenv("/Users/sagar/work/yral/hot-or-not-game-evaluator/test/.env")
@@ -38,7 +34,7 @@ WATCH_PERCENTAGE_RANGE = 0.7
 
 
 # %%
-def get_latest_timestamp(video_id="sgx-test_video_simple", conn_string=conn_string):
+def get_latest_timestamp(video_id, conn_string=conn_string):
     """
     Get the latest timestamp in the video_engagement_relation table for a specific video.
     This will be our starting point for new data.
@@ -82,13 +78,13 @@ def get_latest_timestamp(video_id="sgx-test_video_simple", conn_string=conn_stri
 
 # %%
 def generate_activity_data(
-    video_id="sgx-test_video_simple",
+    video_id,
     start_timestamp=None,
     duration_hours=24,
     interval_minutes=4,
     events_per_interval=10,
     growth_rate=1.05,  # 5% growth per interval
-    pattern_type="steady-increase",  # Default to steady-increase for backward compatibility
+    pattern_type="increase",
     **kwargs,
 ):
     """
@@ -112,7 +108,7 @@ def generate_activity_data(
 
     print(f"Generating activity data from: {start_timestamp}")
 
-    # Use ActivityGenerator for all patterns, with steady-increase as the default
+    # Use ActivityGenerator for all patterns, with increase as the default
     generator = ActivityGenerator(pattern_type=pattern_type)
     return generator.generate_data(
         video_id=video_id,
@@ -1046,100 +1042,11 @@ def visualize_score_comparisons(
     plt.tight_layout()
 
     if save_dir:
-        combined_file = os.path.join(save_dir, "combined_comparison.png")
+        combined_file = os.path.join(
+            save_dir, f"{pattern_type}_combined_comparison.png"
+        )
         plt.savefig(combined_file, dpi=300)
         saved_files.append(combined_file)
-
-    # Also create individual plots for backward compatibility
-    # DS scores over time (reusing the same code as before)
-    plt.figure(figsize=(12, 6))
-
-    # Plot PostgreSQL data
-    sns.lineplot(
-        x=postgres_data["timestamp_mnt"],
-        y=postgres_data["ds_score"],
-        label="PostgreSQL DS Score",
-        color="navy",
-    )
-
-    # Plot pandas data
-    if not pandas_metrics.empty:
-        sns.lineplot(
-            x=pandas_metrics["timestamp_mnt"],
-            y=pandas_metrics["ds_score"],
-            label="Pandas DS Score",
-            color="crimson",
-            linestyle="--",
-        )
-
-    plt.title(f"{title_prefix}DS Score Trend Comparison", fontsize=14)
-    plt.xlabel("Time", fontsize=12)
-    plt.ylabel("DS Score", fontsize=12)
-    plt.legend()
-    plt.tight_layout()
-
-    if save_dir:
-        ds_score_file = os.path.join(save_dir, "ds_score_comparison.png")
-        plt.savefig(ds_score_file, dpi=300)
-        saved_files.append(ds_score_file)
-
-    # Bar comparison if we have current and reference scores
-    if (
-        pandas_status["current_avg_ds_score"] is not None
-        and postgres_status["current_avg_ds_score"] is not None
-    ):
-        plt.figure(figsize=(10, 6))
-
-        # Reuse the same comp_data as above
-        comp_data = pd.DataFrame(
-            {
-                "Metric": [
-                    "Current DS Score",
-                    "Current DS Score",
-                    "Reference DS Score",
-                    "Reference DS Score",
-                ],
-                "Implementation": ["Pandas", "PostgreSQL", "Pandas", "PostgreSQL"],
-                "Value": [
-                    pandas_status["current_avg_ds_score"],
-                    postgres_status["current_avg_ds_score"],
-                    (
-                        pandas_status["reference_predicted_avg_ds_score"]
-                        if pandas_status["reference_predicted_avg_ds_score"] is not None
-                        else 0
-                    ),
-                    (
-                        postgres_status["reference_predicted_avg_ds_score"]
-                        if postgres_status["reference_predicted_avg_ds_score"]
-                        is not None
-                        else 0
-                    ),
-                ],
-            }
-        )
-
-        # Create grouped bar chart
-        ax = sns.barplot(
-            x="Metric",
-            y="Value",
-            hue="Implementation",
-            data=comp_data,
-            palette=["crimson", "navy"],
-        )
-
-        # Add values on top of the bars
-        for bar in ax.containers:
-            ax.bar_label(bar, fmt="%.2f")
-
-        plt.title(f"{title_prefix}Current vs Reference DS Score", fontsize=14)
-        plt.ylabel("DS Score", fontsize=12)
-        plt.legend(title="Implementation", bbox_to_anchor=(1.05, 1), loc="upper left")
-        plt.tight_layout()
-
-        if save_dir:
-            bar_comp_file = os.path.join(save_dir, "score_bar_comparison.png")
-            plt.savefig(bar_comp_file, dpi=300)
-            saved_files.append(bar_comp_file)
 
     return saved_files if save_dir else None
 
@@ -1360,8 +1267,8 @@ def run_all_activity_patterns(base_timestamp=None, base_output_dir="output"):
     # Define patterns to run with their parameters
     patterns = [
         {
-            "pattern_type": "steady-increase",
-            "video_id": "sgx-test_video_simple",
+            "pattern_type": "increase",
+            "video_id": "sgx-test_video_increase",
             "growth_rate": 1.05,
         },
         {
@@ -1443,30 +1350,123 @@ def run_all_activity_patterns(base_timestamp=None, base_output_dir="output"):
 
 # %%
 if __name__ == "__main__":
+    # Create BackFill instances with different patterns
+    backfill_increase = BackFill(pattern_type="increase")
+    backfill_spike = BackFill(pattern_type="spike")
+    backfill_decrease = BackFill(pattern_type="decrease")
+    backfill_plateau = BackFill(pattern_type="plateau")
+    backfill_fluctuate = BackFill(pattern_type="fluctuate")
+
     # Use default timestamp if none provided
-    base_timestamp = datetime(2025, 4, 29, 20, 30, 0)
+    base_timestamp = datetime.now() - timedelta(minutes=4)
+    n_days = 1
+    interval_minutes = 1
+    events_per_interval = 10
+    growth_rate = 1.08  # for increase
+    spike_position = 0.7  # for spike
+    spike_magnitude = 4.0  # for spike
+    decay_rate = 0.92  # for decrease
+    fluctuation_amplitude = 0.4  # for fluctuate
+    growth_phase = 0.3  # for plateau
+    plateau_level = 2.5  # for plateau
 
     # Clean database if needed
-    clean_database_post_data_population(
-        test_video_id_prefix="sgx-",
-        end_time=base_timestamp,
+    clean_database_static(
+        test_video_id_prefix="sgx-", end_time=None, conn_string=conn_string
     )
 
-    for i in [
-        "sgx-test_video_increase",
-        "sgx-test_video_spike",
-        "sgx-test_video_decrease",
-        "sgx-test_video_fluctuate",
-        "sgx-test_video_plateau",
-    ]:
-        generate_data_to_populate_database(
-            end_time=base_timestamp,
-            period=timedelta(days=1),
-            video_id=i,
-        )
+    # Generate data with the BackFill instances
+    print("\n=== Generating data with INCREASING pattern ===")
+    data_increase = backfill_increase.backfill_data(
+        video_id="sgx-test_video_increase",
+        end_time=base_timestamp,
+        period=timedelta(days=n_days),
+        interval_minutes=interval_minutes,
+        events_per_interval=events_per_interval,
+        pattern_kwargs={
+            "pattern_type": "increase",
+            "growth_rate": growth_rate,
+        },  # 8% growth rate
+    )
+
+    print("\n=== Generating data with SPIKE pattern ===")
+    data_spike = backfill_spike.backfill_data(
+        video_id="sgx-test_video_spike",
+        end_time=base_timestamp,
+        period=timedelta(days=1),
+        interval_minutes=5,
+        events_per_interval=10,
+        pattern_kwargs={
+            "pattern_type": "spike",
+            "spike_position": spike_position,
+            "spike_magnitude": spike_magnitude,
+        },  # Spike at 70% with 4x magnitude
+    )
+
+    print("\n=== Generating data with DECREASING pattern ===")
+    data_decrease = backfill_decrease.backfill_data(
+        video_id="sgx-test_video_decrease",
+        end_time=base_timestamp,
+        period=timedelta(days=1),
+        interval_minutes=5,
+        events_per_interval=10,
+        pattern_kwargs={
+            "pattern_type": "decrease",
+            "decay_rate": decay_rate,
+        },  # 8% decrease per interval
+    )
+
+    print("\n=== Generating data with PLATEAU pattern ===")
+    data_plateau = backfill_plateau.backfill_data(
+        video_id="sgx-test_video_plateau",
+        end_time=base_timestamp,
+        period=timedelta(days=1),
+        interval_minutes=5,
+        events_per_interval=10,
+        pattern_kwargs={
+            "pattern_type": "plateau",
+            "growth_phase": growth_phase,
+            "plateau_level": plateau_level,
+        },
+    )
+
+    print("\n=== Generating data with FLUCTUATE pattern ===")
+    data_fluctuate = backfill_fluctuate.backfill_data(
+        video_id="sgx-test_video_fluctuate",
+        end_time=base_timestamp,
+        period=timedelta(days=n_days),
+        interval_minutes=interval_minutes,
+        events_per_interval=events_per_interval,
+        pattern_kwargs={
+            "pattern_type": "fluctuate",
+            "fluctuation_amplitude": fluctuation_amplitude,
+        },
+    )
+    # Check hot status for all videos
+    with psycopg.connect(conn_string) as conn:
+        with conn.cursor() as cur:
+            # Check all generated videos
+            for video_id in [
+                "sgx-test_video_increase",
+                "sgx-test_video_spike",
+                "sgx-test_video_decrease",
+                "sgx-test_video_plateau",
+                "sgx-test_video_fluctuate",
+            ]:
+                cur.execute(
+                    "SELECT * FROM hot_or_not_evaluator.video_hot_or_not_status WHERE video_id = %s",
+                    (video_id,),
+                )
+                result = cur.fetchone()
+                if result:
+                    print(f"\n{video_id} status: {'Hot' if result[2] else 'Not Hot'}")
+                    print(f"Current avg DS score: {result[5]}")
+                    print(f"Reference predicted DS score: {result[6]}")
+                else:
+                    print(f"\n{video_id}: No hot status found")
 
     # Create output directory
-    output_dir = "activity_output"
+    # output_dir = "activity_output"
 
     # Option 1: Run a single pattern
     """
@@ -1481,7 +1481,12 @@ if __name__ == "__main__":
     )
     """
 
+    output_dir = "activity_data_output"
+    run_activity_base_timestamp = base_timestamp + timedelta(minutes=1)
     # Option 2: Run all patterns sequentially and generate a summary report
-    run_all_activity_patterns(base_timestamp=base_timestamp, base_output_dir=output_dir)
+    run_all_activity_patterns(
+        base_timestamp=run_activity_base_timestamp,
+        base_output_dir=output_dir,
+    )
 
 # %%

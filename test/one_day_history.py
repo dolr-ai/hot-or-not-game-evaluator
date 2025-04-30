@@ -11,6 +11,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import time
 from IPython.display import display
+from activity_generator import BackFill
 
 
 # Load environment variables
@@ -381,39 +382,88 @@ def clean_database_post_data_population(
 # %%
 # Example usage:
 if __name__ == "__main__":
-    # Generate the data
-    data = generate_one_day_data(
-        end_time=datetime(2025, 4, 29, 16, 30, 0),
+    # Create BackFill instances with different patterns
+    backfill_increase = BackFill(pattern_type="increase")
+    backfill_spike = BackFill(pattern_type="spike")
+    backfill_decrease = BackFill(pattern_type="decrease")
+    backfill_plateau = BackFill(pattern_type="plateau")
+
+    # Set timeframe
+    end_time = datetime(2025, 4, 29, 16, 30, 0)
+
+    # Generate data with the increasing pattern (default)
+    print("\n=== Generating data with INCREASING pattern ===")
+    data_increase = backfill_increase.backfill_data(
+        video_id="sgx-test_increase",
+        end_time=end_time,
         period=timedelta(days=1),
-        video_id="sgx-test_video_simple",
+        pattern_kwargs={"growth_rate": 1.08},  # 8% growth rate
     )
 
     # Display a sample of the data
-    print(f"Generated {len(data)} minutes of data")
-    display(data.head())
+    print(f"Generated {len(data_increase)} minutes of data")
+    display(data_increase.head())
 
-    # Print min and max timestamp
-    print(f"Min timestamp: {data['timestamp_mnt'].min()}")
-    print(f"Max timestamp: {data['timestamp_mnt'].max()}")
+    # Generate data with spike pattern
+    print("\n=== Generating data with SPIKE pattern ===")
+    data_spike = backfill_spike.backfill_data(
+        video_id="sgx-test_spike",
+        end_time=end_time,
+        period=timedelta(days=1),
+        pattern_kwargs={
+            "spike_position": 0.7,
+            "spike_magnitude": 4.0,
+        },  # Spike at 70% with 4x magnitude
+    )
 
-    # Populate the database
-    populate_database_with_data(data, conn_string)
+    # Display a sample of the data
+    print(f"Generated {len(data_spike)} minutes of data")
+    display(data_spike.head())
 
-    # Check hot status after populating
-    with psycopg.connect(conn_string) as conn:
+    # Generate data with decreasing pattern
+    print("\n=== Generating data with DECREASING pattern ===")
+    data_decrease = backfill_decrease.backfill_data(
+        video_id="sgx-test_decrease",
+        end_time=end_time,
+        period=timedelta(days=1),
+        pattern_kwargs={"decay_rate": 0.92},  # 8% decrease per interval
+    )
+
+    # Display a sample of the data
+    print(f"Generated {len(data_decrease)} minutes of data")
+    display(data_decrease.head())
+
+    # Generate data with plateau pattern
+    print("\n=== Generating data with PLATEAU pattern ===")
+    data_plateau = backfill_plateau.backfill_data(
+        video_id="sgx-test_plateau",
+        end_time=end_time,
+        period=timedelta(days=1),
+        pattern_kwargs={"growth_phase": 0.3, "plateau_level": 2.5},
+    )
+
+    # Display a sample of the data
+    print(f"Generated {len(data_plateau)} minutes of data")
+    display(data_plateau.head())
+
+    # Check hot status for all videos
+    with psycopg.connect(backfill_increase.conn_string) as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT * FROM hot_or_not_evaluator.video_hot_or_not_status WHERE video_id = %s",
-                ("sgx-test_video_simple",),
-            )
-            result = cur.fetchone()
-            if result:
-                print(f"Hot status: {'Hot' if result[2] else 'Not Hot'}")
-                print(f"Current avg DS score: {result[5]}")
-                print(f"Reference predicted DS score: {result[6]}")
-            else:
-                print("No hot status found")
-# # %%
-# result
-# # %%
-# data["watch_count_mnt"].describe()
+            # Check all generated videos
+            for video_id in [
+                "sgx-test_increase",
+                "sgx-test_spike",
+                "sgx-test_decrease",
+                "sgx-test_plateau",
+            ]:
+                cur.execute(
+                    "SELECT * FROM hot_or_not_evaluator.video_hot_or_not_status WHERE video_id = %s",
+                    (video_id,),
+                )
+                result = cur.fetchone()
+                if result:
+                    print(f"\n{video_id} status: {'Hot' if result[2] else 'Not Hot'}")
+                    print(f"Current avg DS score: {result[5]}")
+                    print(f"Reference predicted DS score: {result[6]}")
+                else:
+                    print(f"\n{video_id}: No hot status found")
