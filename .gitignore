@@ -32,3 +32,5 @@ venv
 
 temp_jay_queries.sql
 diagnostic_test_queries.sql
+prod.env
+roles.sql
