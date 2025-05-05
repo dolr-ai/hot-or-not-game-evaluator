@@ -155,5 +155,5 @@ where video_id LIKE 'sgx-%'
 select * from hot_or_not_evaluator.video_hot_or_not_status
 where video_id LIKE 'sgx-%'
 
-select count(*) from hot_or_not_evaluator.video_engagement_relation
-where video_id LIKE 'sgx-%'
+select * from hot_or_not_evaluator.video_engagement_relation
+where video_id LIKE 'sgx-%' limit 10

@@ -17,7 +17,7 @@ from plot_utils import visualize_score_comparisons
 from activity_generator import ActivityGenerator, BackFill, clean_database_static
 
 # Load environment variables
-load_dotenv("/Users/sagar/work/yral/hot-or-not-game-evaluator/test/.env")
+load_dotenv("/Users/sagar/work/yral/hot-or-not-game-evaluator/prod.env")
 
 # Database connection parameters
 db_host = os.getenv("DB_HOST")
@@ -29,12 +29,12 @@ conn_string = f"host={db_host} port={db_port} dbname={db_name} user={db_user} pa
 
 # Constants for normalization (from metric_const table)
 LIKE_CTR_CENTER = 0
-LIKE_CTR_RANGE = 0.2
+LIKE_CTR_RANGE = 0.05
 WATCH_PERCENTAGE_CENTER = 0
-WATCH_PERCENTAGE_RANGE = 0.7
+WATCH_PERCENTAGE_RANGE = 0.9
 
 # Directory structure configuration
-ROOT_DATA_DIR = "stage_test_1"
+ROOT_DATA_DIR = "prod_test_new_met_const_gen_change_9"
 BACKFILL_DATA_DIR = os.path.join(ROOT_DATA_DIR, "activity_data_backfill")
 OUTPUT_DATA_DIR = os.path.join(ROOT_DATA_DIR, "activity_data_output")
 
@@ -560,6 +560,8 @@ def compute_hot_or_not_pandas(minute_metrics, video_id):
 
     # Determine if video is hot
     if current_avg_ds is not None and ref_predicted_avg_ds is not None:
+        # A video is considered "hot" if the current average DS score is greater than
+        # the reference predicted DS score from linear regression
         is_hot = current_avg_ds > ref_predicted_avg_ds
         print(
             f"Video is {'hot' if is_hot else 'not hot'}: {current_avg_ds} {'>' if is_hot else '<='} {ref_predicted_avg_ds}"
@@ -1140,6 +1142,9 @@ if __name__ == "__main__":
     backfill_decrease = BackFill(pattern_type="decrease")
     backfill_plateau = BackFill(pattern_type="plateau")
     backfill_fluctuate = BackFill(pattern_type="fluctuate")
+    backfill_drop = BackFill(
+        pattern_type="drop"
+    )  # Added new pattern for "not hot" simulation
 
     # Use default timestamp if none provided
     base_timestamp = datetime.now() - timedelta(minutes=4)
@@ -1154,6 +1159,7 @@ if __name__ == "__main__":
     fluctuation_amplitude = 0.5  # Increased fluctuation amplitude
     growth_phase = 0.3  # for plateau
     plateau_level = 3.0  # Increased plateau level for more engagement
+    drop_ratio = 0.3  # Severe drop ratio for "not hot" simulation
 
     # Configure duration for newer activity generation
     simulation_duration_hours = 30 / 60
@@ -1240,6 +1246,20 @@ if __name__ == "__main__":
         output_dir=BACKFILL_DATA_DIR,
     )
 
+    print("\n=== Generating data with DROP pattern (Not Hot) ===")
+    data_drop = backfill_drop.backfill_data(
+        video_id="sgx-test_video_drop",
+        end_time=base_timestamp,
+        period=timedelta(days=n_days),
+        interval_minutes=interval_minutes,
+        events_per_interval=30,  # Start with higher engagement
+        pattern_kwargs={
+            "pattern_type": "drop",
+            "drop_ratio": drop_ratio,  # Engagement drops to 30% in current window
+        },
+        output_dir=BACKFILL_DATA_DIR,
+    )
+
     # Check hot status for all videos
     with psycopg.connect(conn_string) as conn:
         with conn.cursor() as cur:
@@ -1250,6 +1270,7 @@ if __name__ == "__main__":
                 "sgx-test_video_decrease",
                 "sgx-test_video_plateau",
                 "sgx-test_video_fluctuate",
+                "sgx-test_video_drop",  # Added new video ID
             ]:
                 cur.execute(
                     "SELECT * FROM hot_or_not_evaluator.video_hot_or_not_status WHERE video_id = %s",
@@ -1306,6 +1327,13 @@ if __name__ == "__main__":
             "growth_phase": 0.4,
             "plateau_level": 3.0,
             "events_per_interval": 20,
+            "duration_hours": simulation_duration_hours,
+        },
+        {
+            "pattern_type": "drop",
+            "video_id": "sgx-test_video_drop",
+            "drop_ratio": 0.3,  # Severe engagement drop
+            "events_per_interval": 5,  # Very few events in current window
             "duration_hours": simulation_duration_hours,
         },
     ]

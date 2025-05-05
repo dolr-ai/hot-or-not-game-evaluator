@@ -64,7 +64,22 @@ def visualize_score_comparisons_zoomed(
     min_time = postgres_zoomed["timestamp_mnt"].min()
     max_time = postgres_zoomed["timestamp_mnt"].max()
 
-    logging.info(f"Zoomed view time range: {min_time} to {max_time}")
+    # IMPORTANT: Adjust time range to include pandas data if it exists
+    # This ensures pandas data will be visible even if it's after PostgreSQL data
+    if not pandas_metrics.empty:
+        pandas_min_time = pandas_metrics["timestamp_mnt"].min()
+        pandas_max_time = pandas_metrics["timestamp_mnt"].max()
+
+        # Extend max_time to include pandas data if needed
+        if pandas_max_time > max_time:
+            max_time = pandas_max_time
+
+        # Log the adjusted time range
+        logging.info(
+            f"Adjusted zoomed view time range to include pandas data: {min_time} to {max_time}"
+        )
+    else:
+        logging.info(f"Original zoomed view time range: {min_time} to {max_time}")
 
     # Plot PostgreSQL data
     sns.lineplot(
@@ -92,43 +107,29 @@ def visualize_score_comparisons_zoomed(
             zorder=5,
         )
 
-    # Plot pandas data if available and within the zoomed time range
+    # Plot pandas data if available - ALWAYS plot it when it exists
     if not pandas_metrics.empty:
-        # Filter pandas data to match the zoomed range
-        pandas_in_range = pandas_metrics[
-            (pandas_metrics["timestamp_mnt"] >= min_time)
-            & (pandas_metrics["timestamp_mnt"] <= max_time)
-        ]
+        # Always plot the pandas data - don't filter by range
+        sns.lineplot(
+            x=pandas_metrics["timestamp_mnt"],
+            y=pandas_metrics["ds_score"],
+            label="sim_pandas_ds_score",
+            color="crimson",
+            linestyle="--",
+            linewidth=2.5,
+            zorder=6,
+        )
+        logging.info(f"Plotted {len(pandas_metrics)} pandas data points")
 
-        if not pandas_in_range.empty:
-            sns.lineplot(
-                x=pandas_in_range["timestamp_mnt"],
-                y=pandas_in_range["ds_score"],
-                label="sim_pandas_ds_score",
-                color="crimson",
-                linestyle="--",
-            )
-            logging.info(f"Plotted {len(pandas_in_range)} pandas points in zoomed view")
-        else:
-            logging.info("No pandas data points within the zoomed time range")
+        # Print details of pandas data for debugging
+        logging.info(
+            f"Pandas data time range: {pandas_metrics['timestamp_mnt'].min()} to {pandas_metrics['timestamp_mnt'].max()}"
+        )
+        logging.info(
+            f"Pandas DS scores: {pandas_metrics['ds_score'].min()} to {pandas_metrics['ds_score'].max()}"
+        )
 
-            # Since pandas data might be right after the PostgreSQL data,
-            # still include it in the plot if it's close to the max time
-            if (
-                pandas_metrics["timestamp_mnt"].min() - max_time
-            ).total_seconds() < 3600:  # Within 1 hour
-                sns.lineplot(
-                    x=pandas_metrics["timestamp_mnt"],
-                    y=pandas_metrics["ds_score"],
-                    label="sim_pandas_ds_score (after zoom range)",
-                    color="crimson",
-                    linestyle="--",
-                )
-                logging.info(
-                    f"Plotted {len(pandas_metrics)} pandas points after zoomed range"
-                )
-
-    # Plot the predicted score if available
+    # Plot the predicted score if available - ALWAYS plot when it exists
     if pandas_status["reference_predicted_avg_ds_score"] is not None:
         pred_score = pandas_status["reference_predicted_avg_ds_score"]
 
@@ -137,63 +138,19 @@ def visualize_score_comparisons_zoomed(
             pandas_min_time = pandas_metrics["timestamp_mnt"].min()
             pandas_max_time = pandas_metrics["timestamp_mnt"].max()
 
-            # Define window edges - these are used for both the shading and prediction point
+            # Define window edges for shading and prediction point
             now = pandas_max_time
             five_mins_ago = max(pandas_min_time, now - timedelta(minutes=5))
 
-            # Calculate midpoint of the current window (last 5 minutes), not the entire pandas range
+            # Calculate midpoint of the current window
             midpoint_timestamp = five_mins_ago + (now - five_mins_ago) / 2
 
-            # Only show if within or close to the zoomed view
-            if (midpoint_timestamp >= min_time and midpoint_timestamp <= max_time) or (
-                abs((midpoint_timestamp - max_time).total_seconds()) < 3600
-            ):  # Within 1 hour
-
-                # Plot the prediction star
-                plt.scatter(
-                    midpoint_timestamp,
-                    pred_score,
-                    color="limegreen",
-                    s=100,
-                    marker="*",
-                    label="predicted_ds_score_regression",
-                    zorder=10,
-                )
-
-                # Add annotation
-                plt.annotate(
-                    f"Predicted: {pred_score:.2f}",
-                    xy=(midpoint_timestamp, pred_score),
-                    xytext=(10, 10),
-                    textcoords="offset points",
-                    bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8),
-                    fontsize=9,
-                )
-
-                # Shade the current window if within view
-                plt.axvspan(
-                    five_mins_ago,
-                    now,
-                    alpha=0.2,
-                    color="limegreen",
-                    label="current_window_data_range",
-                )
-
-                # Print info for debugging
-                print(f"\n=== Zoomed View Prediction Details ===")
-                print(f"Current window: {five_mins_ago} to {now}")
-                print(f"Midpoint for prediction: {midpoint_timestamp}")
-                print(f"Predicted score: {pred_score}")
-                print("=" * 50)
-        else:
-            # If no pandas data, use the latest PostgreSQL timestamp
-            midpoint_timestamp = max_time - timedelta(minutes=2.5)  # 2.5 min before max
-
+            # ALWAYS plot the prediction point - don't check if it's in range
             plt.scatter(
                 midpoint_timestamp,
                 pred_score,
                 color="limegreen",
-                s=100,
+                s=150,  # Increased size for better visibility
                 marker="*",
                 label="predicted_ds_score_regression",
                 zorder=10,
@@ -206,7 +163,46 @@ def visualize_score_comparisons_zoomed(
                 xytext=(10, 10),
                 textcoords="offset points",
                 bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8),
-                fontsize=9,
+                fontsize=10,  # Increased font size for better visibility
+            )
+
+            # Shade the current window
+            plt.axvspan(
+                five_mins_ago,
+                now,
+                alpha=0.2,
+                color="limegreen",
+                label="current_window_data_range",
+            )
+
+            # Print info for debugging
+            print(f"\n=== Zoomed View Prediction Details ===")
+            print(f"Current window: {five_mins_ago} to {now}")
+            print(f"Midpoint for prediction: {midpoint_timestamp}")
+            print(f"Predicted score: {pred_score}")
+            print("=" * 50)
+        else:
+            # If no pandas data, use the latest PostgreSQL timestamp
+            midpoint_timestamp = max_time - timedelta(minutes=2.5)
+
+            plt.scatter(
+                midpoint_timestamp,
+                pred_score,
+                color="limegreen",
+                s=150,
+                marker="*",
+                label="predicted_ds_score_regression",
+                zorder=10,
+            )
+
+            # Add annotation
+            plt.annotate(
+                f"Predicted: {pred_score:.2f}",
+                xy=(midpoint_timestamp, pred_score),
+                xytext=(10, 10),
+                textcoords="offset points",
+                bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.8),
+                fontsize=10,
             )
 
     # Set titles and labels
@@ -219,6 +215,28 @@ def visualize_score_comparisons_zoomed(
 
     # Rotate x-axis labels for better readability
     plt.xticks(rotation=45, ha="right")
+
+    # Ensure plot limits include ALL data
+    if not pandas_metrics.empty:
+        # Get axis instance
+        ax = plt.gca()
+
+        # Set xlim to include all data
+        current_xlim = ax.get_xlim()
+        ax.set_xlim(min_time, max_time)
+
+        # Ensure y-axis has some padding
+        y_data_points = list(postgres_zoomed["ds_score"])
+        if not pandas_metrics.empty:
+            y_data_points.extend(list(pandas_metrics["ds_score"]))
+
+        if pandas_status["reference_predicted_avg_ds_score"] is not None:
+            y_data_points.append(pandas_status["reference_predicted_avg_ds_score"])
+
+        if y_data_points:
+            min_y = min(y_data_points) * 0.99
+            max_y = max(y_data_points) * 1.01
+            ax.set_ylim(min_y, max_y)
 
     # Adjust layout
     plt.tight_layout()

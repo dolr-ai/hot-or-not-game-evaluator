@@ -5,7 +5,13 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 dev-debug.log
+*.zip
+*.txt
+*.json
+*.env
 
+*.cpython
+__pycache__
 # Dependency directories
 node_modules/
 
@@ -26,9 +32,12 @@ node_modules/
 
 # Task files
 tasks.json
-tasks/ 
+tasks/
 venv
 .windsurfrules
 
 temp_jay_queries.sql
 diagnostic_test_queries.sql
+
+*.png
+*.log

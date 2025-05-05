@@ -25,7 +25,7 @@ class ActivityGenerator:
         Args:
             pattern_type (str): The type of activity pattern to generate.
                 Options include: "increase", "spike", "decrease",
-                "fluctuate", "plateau"
+                "fluctuate", "plateau", "drop"
         """
         self.pattern_type = pattern_type
         self.supported_patterns = {
@@ -34,6 +34,8 @@ class ActivityGenerator:
             "decrease": self._generate_decrease,
             "fluctuate": self._generate_fluctuate,
             "plateau": self._generate_plateau,
+            "drop": self._generate_drop,
+            "random": self._generate_random,
         }
 
         if pattern_type not in self.supported_patterns:
@@ -419,6 +421,154 @@ class ActivityGenerator:
 
         return pd.DataFrame(data)
 
+    def _generate_drop(
+        self,
+        video_id,
+        start_timestamp,
+        duration_hours,
+        interval_minutes,
+        events_per_interval,
+        drop_ratio=0.3,
+        min_events_per_interval=1,
+        **kwargs,
+    ):
+        """
+        Generate activity data that starts high but then suddenly drops.
+        This should result in a "not hot" prediction as current DS score
+        will be lower than the predicted reference score.
+
+        Args:
+            drop_ratio (float): Ratio to which engagement drops (0-1)
+            min_events_per_interval (int): Minimum events per interval
+        """
+        # Create time intervals
+        end_timestamp = start_timestamp + timedelta(hours=duration_hours)
+        is_tz_aware = (
+            hasattr(start_timestamp, "tzinfo") and start_timestamp.tzinfo is not None
+        )
+
+        if is_tz_aware:
+            intervals = pd.date_range(
+                start=start_timestamp + timedelta(minutes=interval_minutes),
+                end=end_timestamp,
+                freq=f"{interval_minutes}min",
+                tz=start_timestamp.tzinfo,
+            )
+        else:
+            intervals = pd.date_range(
+                start=start_timestamp + timedelta(minutes=interval_minutes),
+                end=end_timestamp,
+                freq=f"{interval_minutes}min",
+            )
+
+        data = []
+        num_intervals = len(intervals)
+
+        # The drop occurs at 70% of the way through the intervals,
+        # which ensures that the current window (last 5 minutes) has the low engagement
+        drop_point = int(num_intervals * 0.7)
+
+        # Generate data with a drop pattern
+        for i, timestamp in tqdm(
+            enumerate(intervals),
+            total=len(intervals),
+            desc="Generating activity",
+        ):
+            # Before the drop point, maintain high engagement
+            if i < drop_point:
+                num_events = events_per_interval
+            # After the drop point, reduce engagement by the drop ratio
+            else:
+                num_events = max(
+                    int(events_per_interval * drop_ratio), min_events_per_interval
+                )
+
+            # Add events with decreasing quality after the drop
+            self._add_events(
+                data,
+                video_id,
+                timestamp,
+                num_events,
+                i,
+                num_intervals,
+                decreasing=(i >= drop_point),  # Lower quality after drop
+            )
+
+        return pd.DataFrame(data)
+
+    def _generate_random(
+        self,
+        video_id,
+        start_timestamp,
+        duration_hours,
+        interval_minutes,
+        events_per_interval,
+        min_events=1,
+        max_events=30,
+        **kwargs,
+    ):
+        """
+        Generate completely random activity data with no discernible pattern.
+
+        Args:
+            min_events (int): Minimum number of events per interval
+            max_events (int): Maximum number of events per interval
+        """
+        # Create time intervals
+        end_timestamp = start_timestamp + timedelta(hours=duration_hours)
+        is_tz_aware = (
+            hasattr(start_timestamp, "tzinfo") and start_timestamp.tzinfo is not None
+        )
+
+        if is_tz_aware:
+            intervals = pd.date_range(
+                start=start_timestamp + timedelta(minutes=interval_minutes),
+                end=end_timestamp,
+                freq=f"{interval_minutes}min",
+                tz=start_timestamp.tzinfo,
+            )
+        else:
+            intervals = pd.date_range(
+                start=start_timestamp + timedelta(minutes=interval_minutes),
+                end=end_timestamp,
+                freq=f"{interval_minutes}min",
+            )
+
+        data = []
+        num_intervals = len(intervals)
+
+        # Generate completely random data
+        for i, timestamp in tqdm(
+            enumerate(intervals),
+            total=num_intervals,
+            desc="Generating random activity",
+        ):
+            # Generate a random number of events between min and max
+            num_events = np.random.randint(min_events, max_events + 1)
+
+            # Add events with random metrics
+            for _ in range(num_events):
+                # Random watch percentage between 0 and 100
+                watch_pct = np.random.uniform(0, 100)
+
+                # Random like probability between 0 and 0.5
+                like_probability = np.random.uniform(0, 0.5)
+
+                # Determine if this event resulted in a like
+                liked = np.random.random() < like_probability
+
+                # Add event to data
+                data.append(
+                    {
+                        "video_id": video_id,
+                        "timestamp_mnt": timestamp,
+                        "liked": liked,
+                        "watch_percentage": watch_pct,
+                    }
+                )
+
+        return pd.DataFrame(data)
+
     def _add_events(
         self,
         data,
@@ -469,20 +619,10 @@ class ActivityGenerator:
         base_like_probability = 0.1 + quality_factor * 0.2
         like_probability = min(0.5, base_like_probability)
 
-        # For increase pattern, make the watch percentage increase more steadily
-        if self.pattern_type == "increase":
-            # More steady increase with smaller variation
-            base_watch_pct = 40 + quality_factor * 30
-            random_variation = 5  # Smaller variation for steadier trend
-        else:
-            base_watch_pct = 40 + quality_factor * 30
-            random_variation = 10  # Original variation
-
         # Add the specified number of events
         for _ in range(num_events):
-            # Add some randomness to watch percentage
-            watch_pct = min(95, base_watch_pct + np.random.normal(0, random_variation))
-            watch_pct = max(10, watch_pct)
+            # Keep watch percentage constant between 60-80%
+            watch_pct = 60 + np.random.uniform(0, 20)
 
             # Determine if this event resulted in a like
             liked = np.random.random() < like_probability
@@ -509,9 +649,9 @@ class BackFill:
 
     # Constants for normalization (from metric_const table)
     LIKE_CTR_CENTER = 0
-    LIKE_CTR_RANGE = 0.2
+    LIKE_CTR_RANGE = 0.05
     WATCH_PERCENTAGE_CENTER = 0
-    WATCH_PERCENTAGE_RANGE = 0.7
+    WATCH_PERCENTAGE_RANGE = 0.9
 
     def __init__(self, conn_string=None, pattern_type="increase"):
         """
