@@ -3,7 +3,9 @@ CREATE OR REPLACE FUNCTION hot_or_not_evaluator.update_counter(
     p_liked BOOLEAN,
     p_watch_percentage NUMERIC -- Expecting 0-100
 )
-RETURNS VOID AS $$
+RETURNS VOID 
+SECURITY DEFINER
+AS $$
 DECLARE
     -- Time and Input Handling
     v_current_minute TIMESTAMPTZ := date_trunc('minute', NOW());

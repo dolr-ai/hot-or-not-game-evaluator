@@ -26,7 +26,7 @@ COMMENT ON COLUMN hot_or_not_evaluator.metric_const.watch_percentage_center IS '
 COMMENT ON COLUMN hot_or_not_evaluator.metric_const.watch_percentage_range IS 'Range value for normalizing cumulative average watch percentage.';
 
 INSERT INTO hot_or_not_evaluator.metric_const (like_ctr_center, like_ctr_range, watch_percentage_center, watch_percentage_range)
-VALUES (0, 0.2, 0, 0.7); -- to update this later in order to upsert instead of insert
+VALUES (0, 0.05, 0, 0.9); -- to update this later in order to upsert instead of insert
 
 CREATE TABLE IF NOT EXISTS hot_or_not_evaluator.video_engagement_relation (
     video_id VARCHAR(255) NOT NULL, -- Or appropriate type based on actual video IDs

@@ -6,7 +6,6 @@ from datetime import datetime
 from dotenv import load_dotenv
 import os
 import concurrent.futures
-load_dotenv()
 
 # Connection parameters (from explore.py)
 db_host = os.getenv("DB_HOST")
