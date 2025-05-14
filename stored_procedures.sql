@@ -212,8 +212,8 @@ BEGIN
             WHERE video_id = v_video_record.video_id;
             
             -- Handle the case where this is the first record for the video
-            -- Default to FALSE (not hot) for new videos
-            v_previous_hot_status := COALESCE(v_previous_hot_status, NULL);
+            -- Default to a random boolean value (TRUE/FALSE) for new videos instead of NULL
+            v_previous_hot_status := COALESCE(v_previous_hot_status, (random() > 0.5));
 
             -- Calculate current average ds_score (last 5 minutes)
             SELECT AVG(ds_score)
@@ -289,11 +289,30 @@ CREATE OR REPLACE FUNCTION hot_or_not_evaluator.get_hot_or_not(p_video_id VARCHA
 RETURNS BOOLEAN AS $$
 DECLARE
     v_status BOOLEAN;
+    v_now TIMESTAMPTZ := NOW();
 BEGIN
     SELECT hot_or_not
     INTO v_status
     FROM hot_or_not_evaluator.video_hot_or_not_status
     WHERE video_id = p_video_id;
+ 
+    -- If status is NULL, assign a random boolean value and persist it
+    IF v_status IS NULL THEN
+        v_status := (random() > 0.5);
+        
+        -- Insert the random status into the database to ensure consistency
+        INSERT INTO hot_or_not_evaluator.video_hot_or_not_status (
+            video_id, last_updated_mnt, hot_or_not,
+            current_avg_ds_score, reference_predicted_avg_ds_score
+        )
+        VALUES (
+            p_video_id, v_now, v_status,
+            NULL, NULL
+        )
+        ON CONFLICT (video_id) DO UPDATE SET
+            last_updated_mnt = EXCLUDED.last_updated_mnt,
+            hot_or_not = EXCLUDED.hot_or_not;
+    END IF;
 
     RETURN v_status;
 END;
@@ -301,4 +320,4 @@ $$ LANGUAGE plpgsql;
 
 COMMENT ON FUNCTION hot_or_not_evaluator.get_hot_or_not(VARCHAR) IS
 'Retrieves the latest calculated "Hot or Not" status (TRUE for Hot, FALSE for Not) for a specific video ID.
-Returns NULL if the video has no status entry.';
+If the video has no status entry, generates a random boolean value, persists it to the database, and returns it.';
