@@ -69,21 +69,33 @@ CREATE INDEX idx_ver_timestamp_mnt ON hot_or_not_evaluator.video_engagement_rela
 CREATE TABLE hot_or_not_evaluator.video_hot_or_not_status (
     video_id VARCHAR(255) PRIMARY KEY, -- Assuming only latest status needed per video
     last_updated_mnt TIMESTAMPTZ NOT NULL,
-    hot_or_not BOOLEAN,
+    hot_or_not BOOLEAN, -- Hot or not status for current window (0 to -5 mins)
+    hot_or_not_5_to_10_mins_ago BOOLEAN, -- Hot or not status for -5 to -10 minutes window
+    hot_or_not_10_to_15_mins_ago BOOLEAN, -- Hot or not status for -10 to -15 minutes window
+    hot_or_not_15_to_20_mins_ago BOOLEAN, -- Hot or not status for -15 to -20 minutes window
     reference_range INTERVAL NOT NULL DEFAULT '1 day',
     current_window_range INTERVAL NOT NULL DEFAULT '5 minutes',
-    current_avg_ds_score NUMERIC(10, 5), -- Store scores for context/debugging
-    reference_predicted_avg_ds_score NUMERIC(10, 5) -- Store scores for context/debugging
+    current_avg_ds_score NUMERIC(10, 5), -- Store scores for context (0 to -5 mins)
+    reference_predicted_avg_ds_score NUMERIC(10, 5), 
+    avg_ds_score_5_to_10_mins_ago NUMERIC(10, 5), -- Average ds_score for -5 to -10 minutes window
+    avg_ds_score_10_to_15_mins_ago NUMERIC(10, 5), -- Average ds_score for -10 to -15 minutes window
+    avg_ds_score_15_to_20_mins_ago NUMERIC(10, 5) -- Average ds_score for -15 to -20 minutes window
 );
 
-COMMENT ON TABLE hot_or_not_evaluator.video_hot_or_not_status IS 'Stores the latest calculated Hot or Not status for each video.';
+COMMENT ON TABLE hot_or_not_evaluator.video_hot_or_not_status IS 'Stores the latest calculated Hot or Not status for each video with historical 5-minute window scores.';
 COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.video_id IS 'Identifier for the video.';
 COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.last_updated_mnt IS 'Timestamp when the status was last calculated.';
-COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.hot_or_not IS 'The classification result: TRUE for Hot, FALSE for Not.';
+COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.hot_or_not IS 'The classification result for current window (0 to -5 mins): TRUE for Hot, FALSE for Not.';
+COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.hot_or_not_5_to_10_mins_ago IS 'The classification result for -5 to -10 minutes window: TRUE for Hot, FALSE for Not.';
+COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.hot_or_not_10_to_15_mins_ago IS 'The classification result for -10 to -15 minutes window: TRUE for Hot, FALSE for Not.';
+COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.hot_or_not_15_to_20_mins_ago IS 'The classification result for -15 to -20 minutes window: TRUE for Hot, FALSE for Not.';
 COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.reference_range IS 'The reference time window used for the calculation (e.g., 1 day).';
 COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.current_window_range IS 'The current time window used for the calculation (e.g., 5 minutes).';
-COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.current_avg_ds_score IS 'The average ds_score calculated for the current window.';
+COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.current_avg_ds_score IS 'The average ds_score calculated for the current window (0 to -5 minutes).';
 COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.reference_predicted_avg_ds_score IS 'The predicted average ds_score based on the reference window OLS extrapolation.';
+COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.avg_ds_score_5_to_10_mins_ago IS 'The average ds_score for the -5 to -10 minutes window.';
+COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.avg_ds_score_10_to_15_mins_ago IS 'The average ds_score for the -10 to -15 minutes window.';
+COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.avg_ds_score_15_to_20_mins_ago IS 'The average ds_score for the -15 to -20 minutes window.';
 
 CREATE INDEX idx_vhons_last_updated ON hot_or_not_evaluator.video_hot_or_not_status(last_updated_mnt);
 

@@ -175,6 +175,9 @@ DECLARE
     -- Time boundaries
     v_now TIMESTAMPTZ := NOW();
     v_5_mins_ago TIMESTAMPTZ := v_now - INTERVAL '5 minutes';
+    v_10_mins_ago TIMESTAMPTZ := v_now - INTERVAL '10 minutes';
+    v_15_mins_ago TIMESTAMPTZ := v_now - INTERVAL '15 minutes';
+    v_20_mins_ago TIMESTAMPTZ := v_now - INTERVAL '20 minutes';
     v_1_day_ago TIMESTAMPTZ := v_now - INTERVAL '1 day';
 
     -- Video iter item
@@ -182,12 +185,21 @@ DECLARE
 
     -- Calculated values per video
     v_current_avg_ds NUMERIC;
+    v_avg_ds_5_to_10_mins NUMERIC;
+    v_avg_ds_10_to_15_mins NUMERIC;
+    v_avg_ds_15_to_20_mins NUMERIC;
     v_ref_slope NUMERIC;
     v_ref_intercept NUMERIC;
     v_ref_count BIGINT; -- To check if enough data for regression
     v_ref_predicted_avg_ds NUMERIC;
     v_is_hot BOOLEAN;
+    v_is_hot_5_to_10_mins BOOLEAN;
+    v_is_hot_10_to_15_mins BOOLEAN;
+    v_is_hot_15_to_20_mins BOOLEAN;
     v_previous_hot_status BOOLEAN;
+    v_previous_hot_status_5_to_10 BOOLEAN;
+    v_previous_hot_status_10_to_15 BOOLEAN;
+    v_previous_hot_status_15_to_20 BOOLEAN;
 BEGIN
     RAISE NOTICE 'Starting compute_hot_or_not at %', v_now;
 
@@ -198,24 +210,33 @@ BEGIN
         WHERE timestamp_mnt >= v_1_day_ago AND timestamp_mnt < v_now
     LOOP
         v_current_avg_ds := NULL;
+        v_avg_ds_5_to_10_mins := NULL;
+        v_avg_ds_10_to_15_mins := NULL;
+        v_avg_ds_15_to_20_mins := NULL;
         v_ref_slope := NULL;
         v_ref_intercept := NULL;
         v_ref_count := 0;
         v_ref_predicted_avg_ds := NULL;
         v_is_hot := NULL; -- we don't know if the video is hot or not yet
+        v_is_hot_5_to_10_mins := NULL;
+        v_is_hot_10_to_15_mins := NULL;
+        v_is_hot_15_to_20_mins := NULL;
 
         BEGIN
             -- Get the previous hot status to maintain if comparison can't be made
-            SELECT hot_or_not
-            INTO v_previous_hot_status
+            SELECT hot_or_not, hot_or_not_5_to_10_mins_ago, hot_or_not_10_to_15_mins_ago, hot_or_not_15_to_20_mins_ago
+            INTO v_previous_hot_status, v_previous_hot_status_5_to_10, v_previous_hot_status_10_to_15, v_previous_hot_status_15_to_20
             FROM hot_or_not_evaluator.video_hot_or_not_status
             WHERE video_id = v_video_record.video_id;
             
             -- Handle the case where this is the first record for the video
             -- Default to a random boolean value (TRUE/FALSE) for new videos instead of NULL
             v_previous_hot_status := COALESCE(v_previous_hot_status, (random() > 0.5));
+            v_previous_hot_status_5_to_10 := COALESCE(v_previous_hot_status_5_to_10, (random() > 0.5));
+            v_previous_hot_status_10_to_15 := COALESCE(v_previous_hot_status_10_to_15, (random() > 0.5));
+            v_previous_hot_status_15_to_20 := COALESCE(v_previous_hot_status_15_to_20, (random() > 0.5));
 
-            -- Calculate current average ds_score (last 5 minutes)
+            -- Calculate current average ds_score (last 5 minutes: 0 to -5 mins)
             SELECT AVG(ds_score)
             INTO v_current_avg_ds
             FROM hot_or_not_evaluator.video_engagement_relation
@@ -223,6 +244,26 @@ BEGIN
             -- we do < v_now and not <= v_now because we want to avoid computing the average for the partially aggregated minute data
               AND timestamp_mnt >= v_5_mins_ago AND timestamp_mnt < v_now;
 
+            -- Calculate average ds_score for -5 to -10 minutes window
+            SELECT AVG(ds_score)
+            INTO v_avg_ds_5_to_10_mins
+            FROM hot_or_not_evaluator.video_engagement_relation
+            WHERE video_id = v_video_record.video_id
+              AND timestamp_mnt >= v_10_mins_ago AND timestamp_mnt < v_5_mins_ago;
+
+            -- Calculate average ds_score for -10 to -15 minutes window
+            SELECT AVG(ds_score)
+            INTO v_avg_ds_10_to_15_mins
+            FROM hot_or_not_evaluator.video_engagement_relation
+            WHERE video_id = v_video_record.video_id
+              AND timestamp_mnt >= v_15_mins_ago AND timestamp_mnt < v_10_mins_ago;
+
+            -- Calculate average ds_score for -15 to -20 minutes window
+            SELECT AVG(ds_score)
+            INTO v_avg_ds_15_to_20_mins
+            FROM hot_or_not_evaluator.video_engagement_relation
+            WHERE video_id = v_video_record.video_id
+              AND timestamp_mnt >= v_20_mins_ago AND timestamp_mnt < v_15_mins_ago;
 
             -- Calculate OLS parameters for the reference period (1 day ago to 5 mins ago)
             SELECT
@@ -242,27 +283,58 @@ BEGIN
                 INTO v_ref_predicted_avg_ds;
             END IF;
 
-            -- Determine if video is hot
+            -- Determine if video is hot for current window (0 to -5 mins)
             IF v_current_avg_ds IS NOT NULL AND v_ref_predicted_avg_ds IS NOT NULL THEN
                 v_is_hot := v_current_avg_ds > v_ref_predicted_avg_ds;
             ELSE
                 v_is_hot := v_previous_hot_status; -- Maintain previous status if comparison cannot be made
             END IF;
 
+            -- Determine if video is hot for -5 to -10 minutes window
+            IF v_avg_ds_5_to_10_mins IS NOT NULL AND v_ref_predicted_avg_ds IS NOT NULL THEN
+                v_is_hot_5_to_10_mins := v_avg_ds_5_to_10_mins > v_ref_predicted_avg_ds;
+            ELSE
+                v_is_hot_5_to_10_mins := v_previous_hot_status_5_to_10;
+            END IF;
+
+            -- Determine if video is hot for -10 to -15 minutes window
+            IF v_avg_ds_10_to_15_mins IS NOT NULL AND v_ref_predicted_avg_ds IS NOT NULL THEN
+                v_is_hot_10_to_15_mins := v_avg_ds_10_to_15_mins > v_ref_predicted_avg_ds;
+            ELSE
+                v_is_hot_10_to_15_mins := v_previous_hot_status_10_to_15;
+            END IF;
+
+            -- Determine if video is hot for -15 to -20 minutes window
+            IF v_avg_ds_15_to_20_mins IS NOT NULL AND v_ref_predicted_avg_ds IS NOT NULL THEN
+                v_is_hot_15_to_20_mins := v_avg_ds_15_to_20_mins > v_ref_predicted_avg_ds;
+            ELSE
+                v_is_hot_15_to_20_mins := v_previous_hot_status_15_to_20;
+            END IF;
+
             -- Update status table (using UPSERT for the latest status)
             INSERT INTO hot_or_not_evaluator.video_hot_or_not_status (
                 video_id, last_updated_mnt, hot_or_not,
-                current_avg_ds_score, reference_predicted_avg_ds_score
+                hot_or_not_5_to_10_mins_ago, hot_or_not_10_to_15_mins_ago, hot_or_not_15_to_20_mins_ago,
+                current_avg_ds_score, reference_predicted_avg_ds_score,
+                avg_ds_score_5_to_10_mins_ago, avg_ds_score_10_to_15_mins_ago, avg_ds_score_15_to_20_mins_ago
             )
             VALUES (
                 v_video_record.video_id, v_now, v_is_hot,
-                v_current_avg_ds, v_ref_predicted_avg_ds
+                v_is_hot_5_to_10_mins, v_is_hot_10_to_15_mins, v_is_hot_15_to_20_mins,
+                v_current_avg_ds, v_ref_predicted_avg_ds,
+                v_avg_ds_5_to_10_mins, v_avg_ds_10_to_15_mins, v_avg_ds_15_to_20_mins
             )
             ON CONFLICT (video_id) DO UPDATE SET
                 last_updated_mnt = EXCLUDED.last_updated_mnt,
                 hot_or_not = EXCLUDED.hot_or_not,
+                hot_or_not_5_to_10_mins_ago = EXCLUDED.hot_or_not_5_to_10_mins_ago,
+                hot_or_not_10_to_15_mins_ago = EXCLUDED.hot_or_not_10_to_15_mins_ago,
+                hot_or_not_15_to_20_mins_ago = EXCLUDED.hot_or_not_15_to_20_mins_ago,
                 current_avg_ds_score = EXCLUDED.current_avg_ds_score,
-                reference_predicted_avg_ds_score = EXCLUDED.reference_predicted_avg_ds_score;
+                reference_predicted_avg_ds_score = EXCLUDED.reference_predicted_avg_ds_score,
+                avg_ds_score_5_to_10_mins_ago = EXCLUDED.avg_ds_score_5_to_10_mins_ago,
+                avg_ds_score_10_to_15_mins_ago = EXCLUDED.avg_ds_score_10_to_15_mins_ago,
+                avg_ds_score_15_to_20_mins_ago = EXCLUDED.avg_ds_score_15_to_20_mins_ago;
 
         EXCEPTION
             WHEN OTHERS THEN
@@ -277,15 +349,9 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-COMMENT ON FUNCTION hot_or_not_evaluator.compute_hot_or_not() IS
-'Calculates the "Hot or Not" status for all recently active videos.
-It compares the average ds_score of the last 5 minutes against a predicted score
-derived from an OLS linear regression of the ds_score over the preceding period (1 day - 5 mins).
-Updates the video_hot_or_not_status table. Intended to be run periodically (e.g., every 5 minutes).';
 
 
-
-CREATE OR REPLACE FUNCTION hot_or_not_evaluator.get_hot_or_not(p_video_id VARCHAR)
+CREATE OR REPLACE FUNCTION hot_or_not_evaluator.get_hot_or_not(p_video_id VARCHAR) -- old function for hot-or-not compatibility
 RETURNS BOOLEAN AS $$
 DECLARE
     v_status BOOLEAN;
@@ -321,3 +387,111 @@ $$ LANGUAGE plpgsql;
 COMMENT ON FUNCTION hot_or_not_evaluator.get_hot_or_not(VARCHAR) IS
 'Retrieves the latest calculated "Hot or Not" status (TRUE for Hot, FALSE for Not) for a specific video ID.
 If the video has no status entry, generates a random boolean value, persists it to the database, and returns it.';
+
+COMMENT ON FUNCTION hot_or_not_evaluator.compute_hot_or_not() IS
+'Calculates the "Hot or Not" status for all recently active videos across multiple time windows.
+It compares the average ds_score of each window against a predicted score derived from an OLS linear regression.
+Computes hot_or_not status for: current (0 to -5 mins), -5 to -10 mins, -10 to -15 mins, and -15 to -20 mins windows.
+Also stores average ds_scores for all windows for analysis.
+Updates the video_hot_or_not_status table. Intended to be run periodically (e.g., every 5 minutes).';
+
+CREATE OR REPLACE FUNCTION hot_or_not_evaluator.get_hot_or_not_multiple_slots_v2(p_video_id VARCHAR)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_status_current BOOLEAN;
+    v_status_5_to_10 BOOLEAN;
+    v_status_10_to_15 BOOLEAN;
+    v_status_15_to_20 BOOLEAN;
+    v_chosen_window INT;
+    v_chosen_status BOOLEAN;
+    v_now TIMESTAMPTZ := NOW();
+    v_record_exists BOOLEAN := FALSE;
+BEGIN
+    -- Get all hot_or_not statuses for the video
+    SELECT 
+        hot_or_not, 
+        hot_or_not_5_to_10_mins_ago, 
+        hot_or_not_10_to_15_mins_ago, 
+        hot_or_not_15_to_20_mins_ago,
+        TRUE
+    INTO 
+        v_status_current, 
+        v_status_5_to_10, 
+        v_status_10_to_15, 
+        v_status_15_to_20,
+        v_record_exists
+    FROM hot_or_not_evaluator.video_hot_or_not_status
+    WHERE video_id = p_video_id;
+    
+    -- If no record exists, create one with random values for all windows
+    IF NOT v_record_exists THEN
+        v_status_current := (random() > 0.5);
+        v_status_5_to_10 := (random() > 0.5);
+        v_status_10_to_15 := (random() > 0.5);
+        v_status_15_to_20 := (random() > 0.5);
+        
+        INSERT INTO hot_or_not_evaluator.video_hot_or_not_status (
+            video_id, last_updated_mnt, hot_or_not,
+            hot_or_not_5_to_10_mins_ago, hot_or_not_10_to_15_mins_ago, hot_or_not_15_to_20_mins_ago,
+            current_avg_ds_score, reference_predicted_avg_ds_score,
+            avg_ds_score_5_to_10_mins_ago, avg_ds_score_10_to_15_mins_ago, avg_ds_score_15_to_20_mins_ago
+        )
+        VALUES (
+            p_video_id, v_now, v_status_current,
+            v_status_5_to_10, v_status_10_to_15, v_status_15_to_20,
+            NULL, NULL, NULL, NULL, NULL
+        );
+    END IF;
+    
+    -- Randomly choose one of the four windows (1-4) with equal probability
+    v_chosen_window := floor(random() * 4) + 1;
+    
+    -- Get the status from the chosen window
+    CASE v_chosen_window
+        WHEN 1 THEN
+            v_chosen_status := v_status_current;
+            -- If current window status is NULL, generate random and update
+            IF v_chosen_status IS NULL THEN
+                v_chosen_status := (random() > 0.5);
+                UPDATE hot_or_not_evaluator.video_hot_or_not_status 
+                SET hot_or_not = v_chosen_status, last_updated_mnt = v_now
+                WHERE video_id = p_video_id;
+            END IF;
+        WHEN 2 THEN
+            v_chosen_status := v_status_5_to_10;
+            -- If 5-10 mins window status is NULL, generate random and update
+            IF v_chosen_status IS NULL THEN
+                v_chosen_status := (random() > 0.5);
+                UPDATE hot_or_not_evaluator.video_hot_or_not_status 
+                SET hot_or_not_5_to_10_mins_ago = v_chosen_status, last_updated_mnt = v_now
+                WHERE video_id = p_video_id;
+            END IF;
+        WHEN 3 THEN
+            v_chosen_status := v_status_10_to_15;
+            -- If 10-15 mins window status is NULL, generate random and update
+            IF v_chosen_status IS NULL THEN
+                v_chosen_status := (random() > 0.5);
+                UPDATE hot_or_not_evaluator.video_hot_or_not_status 
+                SET hot_or_not_10_to_15_mins_ago = v_chosen_status, last_updated_mnt = v_now
+                WHERE video_id = p_video_id;
+            END IF;
+        WHEN 4 THEN
+            v_chosen_status := v_status_15_to_20;
+            -- If 15-20 mins window status is NULL, generate random and update
+            IF v_chosen_status IS NULL THEN
+                v_chosen_status := (random() > 0.5);
+                UPDATE hot_or_not_evaluator.video_hot_or_not_status 
+                SET hot_or_not_15_to_20_mins_ago = v_chosen_status, last_updated_mnt = v_now
+                WHERE video_id = p_video_id;
+            END IF;
+    END CASE;
+
+    RETURN v_chosen_status;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION hot_or_not_evaluator.get_hot_or_not(VARCHAR) IS
+'Retrieves a randomly chosen "Hot or Not" status from one of the four time windows with equal probability.
+Windows: current (0 to -5 mins), -5 to -10 mins, -10 to -15 mins, -15 to -20 mins.
+If the chosen window has no status, generates a random boolean value, persists it to the database, and returns it.
+If no record exists for the video, creates a new record with random values for all windows.';
