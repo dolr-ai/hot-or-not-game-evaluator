@@ -87,4 +87,5 @@ COMMENT ON COLUMN hot_or_not_evaluator.video_hot_or_not_status.reference_predict
 
 CREATE INDEX idx_vhons_last_updated ON hot_or_not_evaluator.video_hot_or_not_status(last_updated_mnt);
 
+
 -- End of schema definition
