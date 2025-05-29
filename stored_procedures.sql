@@ -495,3 +495,236 @@ COMMENT ON FUNCTION hot_or_not_evaluator.get_hot_or_not(VARCHAR) IS
 Windows: current (0 to -5 mins), -5 to -10 mins, -10 to -15 mins, -15 to -20 mins.
 If the chosen window has no status, generates a random boolean value, persists it to the database, and returns it.
 If no record exists for the video, creates a new record with random values for all windows.';
+
+-- Function to update average reference predicted ds score in metric_const table
+CREATE OR REPLACE FUNCTION hot_or_not_evaluator.update_avg_reference_predicted_ds_score()
+RETURNS VOID AS $$
+DECLARE
+    v_current_time TIMESTAMPTZ := NOW();
+    v_three_days_ago TIMESTAMPTZ := v_current_time - INTERVAL '3 days';
+    
+    -- Current values from metric_const
+    v_current_avg NUMERIC;
+    v_current_count BIGINT;
+    v_last_updated TIMESTAMPTZ;
+    
+    -- New data from last 3 days
+    v_new_avg NUMERIC;
+    v_new_count BIGINT;
+    
+    -- Updated values
+    v_updated_avg NUMERIC;
+    v_updated_count BIGINT;
+    
+    -- For handling first run
+    v_metric_const_exists BOOLEAN := FALSE;
+BEGIN
+    -- Get current values from metric_const
+    SELECT 
+        avg_reference_predicted_ds_score,
+        avg_reference_predicted_ds_score_count,
+        avg_reference_predicted_ds_score_last_updated,
+        TRUE
+    INTO 
+        v_current_avg,
+        v_current_count,
+        v_last_updated,
+        v_metric_const_exists
+    FROM hot_or_not_evaluator.metric_const 
+    WHERE id = 1;
+    
+    -- Initialize defaults if this is the first run or row doesn't exist
+    IF NOT v_metric_const_exists THEN
+        v_current_avg := NULL;
+        v_current_count := 0;
+        v_last_updated := NULL;
+        RAISE NOTICE 'First run: metric_const row does not exist, will create it';
+    END IF;
+    
+    -- Calculate new average and count from videos updated in the last 3 days
+    -- Only include videos that have been updated since our last calculation
+    SELECT 
+        AVG(reference_predicted_avg_ds_score),
+        COUNT(reference_predicted_avg_ds_score)
+    INTO 
+        v_new_avg,
+        v_new_count
+    FROM hot_or_not_evaluator.video_hot_or_not_status
+    WHERE reference_predicted_avg_ds_score IS NOT NULL
+      AND last_updated_mnt >= v_three_days_ago
+      AND (v_last_updated IS NULL OR last_updated_mnt > v_last_updated);
+    
+    -- Handle case where no new data is available
+    IF v_new_count = 0 THEN
+        RAISE NOTICE 'No new data found since last update (%), keeping existing values', v_last_updated;
+        
+        -- Update only the timestamp to mark that we checked
+        UPDATE hot_or_not_evaluator.metric_const 
+        SET avg_reference_predicted_ds_score_last_updated = v_current_time
+        WHERE id = 1;
+        
+        RETURN;
+    END IF;
+    
+    -- Calculate updated average using incremental formula
+    IF v_current_avg IS NULL OR v_current_count = 0 THEN
+        -- First calculation or reset
+        v_updated_avg := v_new_avg;
+        v_updated_count := v_new_count;
+        RAISE NOTICE 'Initial calculation: avg=%, count=%', v_updated_avg, v_updated_count;
+    ELSE
+        -- Incremental update: new_avg = (old_avg * old_count + new_avg * new_count) / (old_count + new_count)
+        v_updated_count := v_current_count + v_new_count;
+        v_updated_avg := (v_current_avg * v_current_count + v_new_avg * v_new_count) / v_updated_count;
+        RAISE NOTICE 'Incremental update: old_avg=% (count=%), new_avg=% (count=%), updated_avg=% (count=%)', 
+                     v_current_avg, v_current_count, v_new_avg, v_new_count, v_updated_avg, v_updated_count;
+    END IF;
+    
+    -- Update metric_const table using UPSERT
+    INSERT INTO hot_or_not_evaluator.metric_const (
+        id, 
+        like_ctr_center, 
+        like_ctr_range, 
+        watch_percentage_center, 
+        watch_percentage_range, 
+        avg_reference_predicted_ds_score,
+        avg_reference_predicted_ds_score_count,
+        avg_reference_predicted_ds_score_last_updated
+    )
+    VALUES (
+        1, 0, 0.05, 0, 0.9, 
+        v_updated_avg,
+        v_updated_count,
+        v_current_time
+    )
+    ON CONFLICT (id) DO UPDATE SET
+        avg_reference_predicted_ds_score = EXCLUDED.avg_reference_predicted_ds_score,
+        avg_reference_predicted_ds_score_count = EXCLUDED.avg_reference_predicted_ds_score_count,
+        avg_reference_predicted_ds_score_last_updated = EXCLUDED.avg_reference_predicted_ds_score_last_updated;
+
+    RAISE NOTICE 'Successfully updated metric_const: avg=%, count=%, timestamp=%', 
+                 v_updated_avg, v_updated_count, v_current_time;
+
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION hot_or_not_evaluator.update_avg_reference_predicted_ds_score() IS
+'Efficiently calculates and updates the average of reference_predicted_avg_ds_score using incremental updates.
+Only processes videos updated in the last 3 days since the last calculation.
+Uses the formula: new_avg = (old_avg * old_count + new_avg * new_count) / (old_count + new_count)
+Maintains count and timestamp for efficient incremental processing.
+Should be run every 3 days via cron job.';
+
+-- Function to compare two videos and determine hot or not status
+CREATE OR REPLACE FUNCTION hot_or_not_evaluator.compare_videos_hot_or_not(
+    p_current_video_id VARCHAR,
+    p_prev_video_id VARCHAR DEFAULT NULL
+)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_current_score NUMERIC;
+    v_prev_score NUMERIC;
+    v_result BOOLEAN;
+    v_now TIMESTAMPTZ := NOW();
+    v_current_video_exists BOOLEAN := FALSE;
+    v_prev_video_exists BOOLEAN := FALSE;
+BEGIN
+    -- Input validation: Check if current_video_id is provided and not empty
+    IF p_current_video_id IS NULL OR TRIM(p_current_video_id) = '' THEN
+        v_result := (random() > 0.5);
+        RAISE WARNING 'Invalid current_video_id provided (NULL or empty), returning random result: %', v_result;
+        RETURN v_result;
+    END IF;
+    
+    -- Input validation: Check if prev_video_id is empty string (treat as NULL)
+    IF p_prev_video_id IS NOT NULL AND TRIM(p_prev_video_id) = '' THEN
+        p_prev_video_id := NULL;
+        RAISE NOTICE 'Empty prev_video_id converted to NULL, will compare against global average';
+    END IF;
+    
+    -- Check if current video exists and get its score
+    SELECT 
+        reference_predicted_avg_ds_score,
+        TRUE
+    INTO 
+        v_current_score,
+        v_current_video_exists
+    FROM hot_or_not_evaluator.video_hot_or_not_status
+    WHERE video_id = TRIM(p_current_video_id);
+    
+    -- Handle non-existent current video
+    IF NOT v_current_video_exists THEN
+        v_result := (random() > 0.5);
+        RAISE WARNING 'Current video_id "%" does not exist in video_hot_or_not_status table, returning random result: %', 
+                     p_current_video_id, v_result;
+        RETURN v_result;
+    END IF;
+    
+    -- If prev_video_id is provided, validate and get its score
+    IF p_prev_video_id IS NOT NULL THEN
+        SELECT 
+            reference_predicted_avg_ds_score,
+            TRUE
+        INTO 
+            v_prev_score,
+            v_prev_video_exists
+        FROM hot_or_not_evaluator.video_hot_or_not_status
+        WHERE video_id = TRIM(p_prev_video_id);
+        
+        -- Handle non-existent previous video
+        IF NOT v_prev_video_exists THEN
+            v_result := (random() > 0.5);
+            RAISE WARNING 'Previous video_id "%" does not exist in video_hot_or_not_status table, returning random result: %', 
+                         p_prev_video_id, v_result;
+            RETURN v_result;
+        END IF;
+        
+        -- Check if either score is missing (NULL)
+        IF v_current_score IS NULL OR v_prev_score IS NULL THEN
+            v_result := (random() > 0.5);
+            RAISE NOTICE 'Missing score data for comparison - Current: "%" (score: %), Previous: "%" (score: %), returning random result: %', 
+                         p_current_video_id, v_current_score, p_prev_video_id, v_prev_score, v_result;
+            RETURN v_result;
+        END IF;
+        
+        -- Compare current video score with previous video score
+        v_result := (v_current_score >= v_prev_score);
+        
+        RAISE NOTICE 'Video comparison - Current: "%" (score: %), Previous: "%" (score: %), Result: % (%)', 
+                     p_current_video_id, v_current_score, p_prev_video_id, v_prev_score, 
+                     v_result, CASE WHEN v_result THEN 'HOT' ELSE 'NOT' END;
+        
+    ELSE
+        -- No previous video provided, return random result
+        v_result := (random() > 0.5);
+        RAISE NOTICE 'No previous video provided for comparison with current video "%", returning random result: %', 
+                     p_current_video_id, v_result;
+    END IF;
+    
+    RETURN v_result;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION hot_or_not_evaluator.compare_videos_hot_or_not(VARCHAR, VARCHAR) IS
+'Compares two videos based on their reference_predicted_avg_ds_score values and returns hot (TRUE) or not (FALSE).
+Parameters:
+- p_current_video_id: The current video to evaluate (required, cannot be NULL or empty)
+- p_prev_video_id: The previous video to compare against (optional)
+
+Logic:
+- Validates input parameters (NULL/empty checks)
+- Verifies video existence in database before attempting comparison
+- If prev_video_id is provided and valid: compares current vs previous video scores
+- If prev_video_id is NULL: returns random result
+- If any required data is missing or invalid: returns a random boolean result
+- Returns TRUE (hot) if current score >= previous score, FALSE (not) otherwise
+
+Corner Cases Handled:
+- NULL or empty current_video_id → random result with warning
+- Non-existent current_video_id → random result with warning  
+- Non-existent prev_video_id → random result with warning
+- Missing scores (NULL values) → random result with notice
+- Empty string prev_video_id → treated as NULL, returns random result
+- NULL prev_video_id → random result
+
+Simple Strategy: Only one comparison mode (video-to-video). Everything else returns random results.';
