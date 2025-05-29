@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS hot_or_not_evaluator.metric_const (
     like_ctr_range NUMERIC NOT NULL,
     watch_percentage_center NUMERIC NOT NULL,
     watch_percentage_range NUMERIC NOT NULL,
+    avg_reference_predicted_ds_score NUMERIC DEFAULT NULL,
+    avg_reference_predicted_ds_score_count BIGINT DEFAULT 0,
+    avg_reference_predicted_ds_score_last_updated TIMESTAMPTZ DEFAULT NULL,
     CONSTRAINT single_row CHECK (id = 1)
 );
 
@@ -24,6 +27,9 @@ COMMENT ON COLUMN hot_or_not_evaluator.metric_const.like_ctr_center IS 'Center v
 COMMENT ON COLUMN hot_or_not_evaluator.metric_const.like_ctr_range IS 'Range value for normalizing cumulative like CTR.';
 COMMENT ON COLUMN hot_or_not_evaluator.metric_const.watch_percentage_center IS 'Center value for normalizing cumulative average watch percentage.';
 COMMENT ON COLUMN hot_or_not_evaluator.metric_const.watch_percentage_range IS 'Range value for normalizing cumulative average watch percentage.';
+COMMENT ON COLUMN hot_or_not_evaluator.metric_const.avg_reference_predicted_ds_score IS 'Average of reference_predicted_avg_ds_score across all videos, updated periodically.';
+COMMENT ON COLUMN hot_or_not_evaluator.metric_const.avg_reference_predicted_ds_score_count IS 'Count of videos used in the average calculation for incremental updates.';
+COMMENT ON COLUMN hot_or_not_evaluator.metric_const.avg_reference_predicted_ds_score_last_updated IS 'Timestamp of the last update to the average reference predicted ds score.';
 
 INSERT INTO hot_or_not_evaluator.metric_const (like_ctr_center, like_ctr_range, watch_percentage_center, watch_percentage_range)
 VALUES (0, 0.05, 0, 0.9); -- to update this later in order to upsert instead of insert
