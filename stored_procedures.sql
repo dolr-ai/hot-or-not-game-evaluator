@@ -728,3 +728,168 @@ Corner Cases Handled:
 - NULL prev_video_id → random result
 
 Simple Strategy: Only one comparison mode (video-to-video). Everything else returns random results.';
+
+
+DROP TYPE IF EXISTS hot_or_not_evaluator.video_comparison_result CASCADE;
+CREATE TYPE hot_or_not_evaluator.video_comparison_result AS (
+    hot_or_not BOOLEAN,
+    current_video_score NUMERIC,
+    previous_video_score NUMERIC
+);
+
+CREATE OR REPLACE FUNCTION hot_or_not_evaluator.compare_videos_hot_or_not_v2(
+    p_current_video_id VARCHAR,
+    p_prev_video_id VARCHAR DEFAULT NULL
+)
+RETURNS hot_or_not_evaluator.video_comparison_result AS $$
+DECLARE
+    v_current_score NUMERIC;
+    v_prev_score NUMERIC;
+    v_hot_or_not BOOLEAN;
+    v_result hot_or_not_evaluator.video_comparison_result;
+    v_now TIMESTAMPTZ := NOW();
+    v_current_video_exists BOOLEAN := FALSE;
+    v_prev_video_exists BOOLEAN := FALSE;
+    v_random_score NUMERIC;
+BEGIN
+    IF p_current_video_id IS NULL OR TRIM(p_current_video_id) = '' THEN
+        v_result.hot_or_not := NULL;
+        v_result.current_video_score := NULL;
+        v_result.previous_video_score := NULL;
+        RAISE WARNING 'Invalid current_video_id provided (NULL or empty), returning NULL values';
+        RETURN v_result;
+    END IF;
+    
+    IF p_prev_video_id IS NOT NULL AND TRIM(p_prev_video_id) = '' THEN
+        p_prev_video_id := NULL;
+        RAISE NOTICE 'Empty prev_video_id converted to NULL';
+    END IF;
+    
+    SELECT 
+        reference_predicted_avg_ds_score,
+        TRUE
+    INTO 
+        v_current_score,
+        v_current_video_exists
+    FROM hot_or_not_evaluator.video_hot_or_not_status
+    WHERE video_id = TRIM(p_current_video_id);
+    
+    IF NOT v_current_video_exists OR v_current_score IS NULL THEN
+        v_random_score := random() * 100;
+        
+        INSERT INTO hot_or_not_evaluator.video_hot_or_not_status (
+            video_id, 
+            last_updated_mnt, 
+            reference_predicted_avg_ds_score,
+            reference_range,
+            current_window_range
+        )
+        VALUES (
+            TRIM(p_current_video_id), 
+            v_now, 
+            v_random_score,
+            '1 day'::INTERVAL,
+            '5 minutes'::INTERVAL
+        )
+        ON CONFLICT (video_id) DO UPDATE SET
+            reference_predicted_avg_ds_score = COALESCE(
+                hot_or_not_evaluator.video_hot_or_not_status.reference_predicted_avg_ds_score, 
+                EXCLUDED.reference_predicted_avg_ds_score
+            );
+        
+        SELECT reference_predicted_avg_ds_score
+        INTO v_current_score
+        FROM hot_or_not_evaluator.video_hot_or_not_status
+        WHERE video_id = TRIM(p_current_video_id);
+        
+        RAISE NOTICE 'Current video "%" score was missing, generated/retrieved score: %', 
+                     p_current_video_id, v_current_score;
+    END IF;
+    
+    IF p_prev_video_id IS NOT NULL THEN
+        SELECT 
+            reference_predicted_avg_ds_score,
+            TRUE
+        INTO 
+            v_prev_score,
+            v_prev_video_exists
+        FROM hot_or_not_evaluator.video_hot_or_not_status
+        WHERE video_id = TRIM(p_prev_video_id);
+        
+        IF NOT v_prev_video_exists OR v_prev_score IS NULL THEN
+            v_random_score := random() * 100;
+            
+            INSERT INTO hot_or_not_evaluator.video_hot_or_not_status (
+                video_id, 
+                last_updated_mnt, 
+                reference_predicted_avg_ds_score,
+                reference_range,
+                current_window_range
+            )
+            VALUES (
+                TRIM(p_prev_video_id), 
+                v_now, 
+                v_random_score,
+                '1 day'::INTERVAL,
+                '5 minutes'::INTERVAL
+            )
+            ON CONFLICT (video_id) DO UPDATE SET
+                reference_predicted_avg_ds_score = COALESCE(
+                    hot_or_not_evaluator.video_hot_or_not_status.reference_predicted_avg_ds_score, 
+                    EXCLUDED.reference_predicted_avg_ds_score
+                );
+            
+            -- Get the score (either newly inserted or existing)
+            SELECT reference_predicted_avg_ds_score
+            INTO v_prev_score
+            FROM hot_or_not_evaluator.video_hot_or_not_status
+            WHERE video_id = TRIM(p_prev_video_id);
+            
+            RAISE NOTICE 'Previous video "%" score was missing, generated/retrieved score: %', 
+                         p_prev_video_id, v_prev_score;
+        END IF;
+        
+        v_hot_or_not := (v_current_score >= v_prev_score);
+        
+        RAISE NOTICE 'Video comparison - Current: "%" (score: %), Previous: "%" (score: %), Result: % (%)', 
+                     p_current_video_id, v_current_score, p_prev_video_id, v_prev_score, 
+                     v_hot_or_not, CASE WHEN v_hot_or_not THEN 'HOT' ELSE 'NOT' END;
+        
+    ELSE
+        v_prev_score := random() * 100;
+        v_hot_or_not := (v_current_score >= v_prev_score);
+        RAISE NOTICE 'No previous video provided, comparing current video "%" (score: %) against random score: %', 
+                     p_current_video_id, v_current_score, v_prev_score;
+    END IF;
+    
+    v_result.hot_or_not := v_hot_or_not;
+    v_result.current_video_score := v_current_score;
+    v_result.previous_video_score := v_prev_score;
+    
+    RETURN v_result;
+END;
+$$ LANGUAGE plpgsql;
+
+COMMENT ON FUNCTION hot_or_not_evaluator.compare_videos_hot_or_not_v3(VARCHAR, VARCHAR) IS
+'Enhanced version that compares two videos and returns hot/not status along with both scores.
+Parameters:
+- p_current_video_id: The current video to evaluate (required)
+- p_prev_video_id: The previous video to compare against (optional)
+
+Returns:
+- hot_or_not: TRUE (hot) if current score >= previous score, FALSE (not) otherwise
+- current_video_score: The reference_predicted_avg_ds_score for current video
+- previous_video_score: The reference_predicted_avg_ds_score for previous video (or random if not provided)
+
+Key Features:
+- Ensures consistency by storing generated random scores in the database
+- Random scores are between 0 and 100
+- Uses INSERT ... ON CONFLICT to handle concurrent requests
+- Only populates necessary columns, leaving others NULL to avoid impacting existing systems
+- If prev_video_id is NULL, generates a random score for comparison but does not store it
+
+Corner Cases Handled:
+- NULL or empty current_video_id → returns all NULL values
+- Non-existent videos → generates and stores random scores for consistency
+- Concurrent requests → handled via ON CONFLICT DO UPDATE with COALESCE
+- NULL scores in existing records → generates and updates with random scores';
