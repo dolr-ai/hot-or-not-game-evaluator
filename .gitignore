@@ -45,3 +45,4 @@ diagnostic_test_queries.sql
 prod.env
 roles.sql
 check_distribution_ds_score.py
+CLAUDE.md
