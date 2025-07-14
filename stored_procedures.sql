@@ -806,6 +806,13 @@ BEGIN
                      p_current_video_id, v_current_score;
     END IF;
     
+    -- Normalize current score if outside 0-100 range
+    IF v_current_score < 0 THEN
+        v_current_score := v_current_score / 100.0;
+    ELSIF v_current_score > 100 THEN
+        v_current_score := 100 + ((v_current_score - 100) / 100.0);
+    END IF;
+    
     IF p_prev_video_id IS NOT NULL THEN
         SELECT 
             reference_predicted_avg_ds_score,
@@ -849,6 +856,13 @@ BEGIN
                          p_prev_video_id, v_prev_score;
         END IF;
         
+        -- Normalize previous score if outside 0-100 range
+        IF v_prev_score < 0 THEN
+            v_prev_score := v_prev_score / 100.0;
+        ELSIF v_prev_score > 100 THEN
+            v_prev_score := 100 + ((v_prev_score - 100) / 100.0);
+        END IF;
+        
         v_hot_or_not := (v_current_score >= v_prev_score);
         
         RAISE NOTICE 'Video comparison - Current: "%" (score: %), Previous: "%" (score: %), Result: % (%)', 
@@ -857,6 +871,7 @@ BEGIN
         
     ELSE
         v_prev_score := random() * 100;
+        -- Note: Random score is already in 0-100 range, no normalization needed for v_prev_score here
         v_hot_or_not := (v_current_score >= v_prev_score);
         RAISE NOTICE 'No previous video provided, comparing current video "%" (score: %) against random score: %', 
                      p_current_video_id, v_current_score, v_prev_score;
