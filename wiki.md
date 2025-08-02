@@ -177,3 +177,51 @@ Enhanced comparative approach that not only determines hot-or-not status but als
 - Implements score normalization for consistent ranges
 - Robust concurrent handling
 
+## 6. `hot_or_not_evaluator.update_counter_v3`
+
+**Signature:**
+
+```sql
+hot_or_not_evaluator.update_counter_v3(
+    p_video_id VARCHAR,
+    p_liked BOOLEAN,
+    p_watch_percentage NUMERIC -- Expecting 0-100
+)
+```
+
+**Purpose:**
+
+New v3 endpoint to give smooth scores
+
+---
+
+## 7. `hot_or_not_evaluator.compare_videos_hot_or_not_v3` (**CURRENT**)
+
+Compares two videos based on their `ds_percentile_score` and returns a hot-or-not decision.
+
+**Signature:**
+
+```sql
+hot_or_not_evaluator.compare_videos_hot_or_not_v3(
+    p_current_video_id VARCHAR,
+    p_prev_video_id VARCHAR
+)
+RETURNS BOOLEAN
+```
+
+**Purpose:**
+
+New v3 endpoint with smooth scores
+
+**Parameters:**
+
+* `p_current_video_id` (VARCHAR): Video being evaluated.
+* `p_prev_video_id` (VARCHAR): Video from the previous round; may be `NULL`.
+
+**Returns:**
+
+* `BOOLEAN`: `TRUE` (hot) if current ≥ previous, `FALSE` (not) otherwise.  
+
+
+
+

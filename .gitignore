@@ -42,7 +42,13 @@ diagnostic_test_queries.sql
 *.png
 *.log
 
-prod.env
+*.env
+*.csv
+temp_test_queries.sql
+analyze_ds_score_distribution.py
+analyzing_pushed_data_with_dfg.py
+create_ingestion_data_for_v2.py
+diagnosing_ds_score_distribution.sql
 roles.sql
 check_distribution_ds_score.py
 CLAUDE.md

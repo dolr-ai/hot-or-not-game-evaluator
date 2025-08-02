@@ -885,7 +885,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-COMMENT ON FUNCTION hot_or_not_evaluator.compare_videos_hot_or_not_v3(VARCHAR, VARCHAR) IS
+COMMENT ON FUNCTION hot_or_not_evaluator.compare_videos_hot_or_not_v2(VARCHAR, VARCHAR) IS
 'Enhanced version that compares two videos and returns hot/not status along with both scores.
 Parameters:
 - p_current_video_id: The current video to evaluate (required)
